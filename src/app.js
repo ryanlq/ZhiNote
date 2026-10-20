@@ -5804,10 +5804,17 @@ function _loadQrLib() {
   if (window.qrcode) return Promise.resolve();
   if (_qrLibLoading) return _qrLibLoading;
   _qrLibLoading = new Promise((resolve, reject) => {
+    // 优先本地（随站点分发，离线可用且不向 jsdelivr 暴露访问）；本地缺失再回退 CDN
     const s = document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js';
+    s.src = 'qrcode.min.js';
     s.onload = () => resolve();
-    s.onerror = () => { _qrLibLoading = null; reject(new Error('二维码加载失败（需联网）')); };
+    s.onerror = () => {
+      const c = document.createElement('script');
+      c.src = 'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js';
+      c.onload = () => resolve();
+      c.onerror = () => { _qrLibLoading = null; reject(new Error('二维码加载失败（需联网）')); };
+      document.head.appendChild(c);
+    };
     document.head.appendChild(s);
   });
   return _qrLibLoading;

@@ -131,6 +131,17 @@ writeFileSync(join(webDir, 'icon.svg'), readFileSync(join(SRC, 'icon.svg'), 'utf
 for (const f of ['apple-touch-icon.png', 'icon-192.png', 'icon-512.png']) {
   writeFileSync(join(webDir, f), readFileSync(join(SRC, f)));
 }
+// 运行时静态资源（本地化改造）：KaTeX 字体与二维码库随站点分发，不再依赖 jsdelivr
+if (existsSync(join(SRC, 'fonts'))) {
+  mkdirSync(join(webDir, 'fonts'), { recursive: true });
+  for (const f of readdirSync(join(SRC, 'fonts'))) {
+    writeFileSync(join(webDir, 'fonts', f), readFileSync(join(SRC, 'fonts', f)));
+  }
+  console.log(`  字体 → web/fonts/ (${readdirSync(join(SRC, 'fonts')).length} 个文件)`);
+}
+for (const f of ['qrcode.min.js']) {
+  if (existsSync(join(SRC, f))) writeFileSync(join(webDir, f), readFileSync(join(SRC, f)));
+}
 console.log(`  网页版输出 → ${webDir}（含 sw.js / manifest / icon / whats-new.json）`);
 
 const finalSize = Buffer.byteLength(output, 'utf8');

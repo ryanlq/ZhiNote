@@ -338,7 +338,14 @@
     if (window.host && window.host.caps && window.host.caps.quicker) return '';
     var raw = '';
     try { raw = String(window.storage.getSetting('webdavProxy') || '').trim().replace(/\/+$/, ''); } catch (_) {}
-    if (!raw || raw === 'direct') return DEFAULT_WEB_PROXY;
+    if (!raw) {
+      // 自托管构建：SELFHOST.webProxy（src/selfhost.js）优先于官方默认
+      var self = '';
+      try { self = String((window.SELFHOST && window.SELFHOST.webProxy) || '').trim().replace(/\/+$/, ''); } catch (_) {}
+      return self || DEFAULT_WEB_PROXY;
+    }
+    // 「直连」即真直连：不再悄悄回落官方中转（AI 服务商若不放行浏览器跨域，将按连接失败如实提示）
+    if (raw === 'direct') return '';
     return raw;
   }
   function requestUrl(base) {

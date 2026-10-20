@@ -202,10 +202,14 @@
   // webdavProxy 设置语义：'' / 未设置 = 用内置默认；'direct' = 直连；其余 = 自定义代理地址。
   // Quicker 宿主无 CORS 限制，恒为直连。
   const DEFAULT_WEB_PROXY = 'https://proxy.zhinote.net';
+  // 自托管构建：SELFHOST.webProxy（src/selfhost.js）优先于官方默认；未配置则维持官方
+  function _selfhostWebProxy() {
+    try { return String((window.SELFHOST && window.SELFHOST.webProxy) || '').trim().replace(/\/+$/, ''); } catch (_) { return ''; }
+  }
   function resolveProxy(raw) {
     if (window.host && window.host.isQuicker()) return '';
     const v = (raw || '').trim().replace(/\/+$/, '');
-    if (!v) return DEFAULT_WEB_PROXY;
+    if (!v) return _selfhostWebProxy() || DEFAULT_WEB_PROXY;
     if (v === 'direct') return '';
     return v;
   }
@@ -216,7 +220,13 @@
   function resolveRelay(raw) {
     const v = (raw || '').trim();
     if (v === 'off') return '';
-    if (!v || v === 'builtin') return DEFAULT_RELAY;
+    if (!v || v === 'builtin') {
+      // 自托管构建：SELFHOST.relay 优先（可填 'off' 表示默认关闭实时同步）
+      const self = (window.SELFHOST && String(window.SELFHOST.relay || '').trim()) || '';
+      if (self === 'off') return '';
+      if (self) return self;
+      return DEFAULT_RELAY;
+    }
     let u = v.replace(/\/+$/, '').replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:');
     if (!/^wss?:/i.test(u)) u = 'wss://' + u;
     return u;
