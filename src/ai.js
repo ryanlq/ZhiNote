@@ -331,8 +331,9 @@
   function endpoint(base) { return String(base || '').replace(/\/+$/, '') + '/chat/completions'; }
 
   // 网页宿主：AI 服务商不允许浏览器直连（CORS），请求经中转 Worker 转发（与 WebDAV 同一个，转发任意 https 目标）。
-  // 复用同步的跨域代理设置（webdavProxy：'' = 内置默认；自定义地址 = 用它）；设为 'direct' 时 AI 仍走默认中转，
-  // 因为「直连」只对支持跨域的网盘成立，AI 服务商一律不放行浏览器。Quicker 桌面宿主无此限制，恒为直连。
+  // 复用同步的跨域代理设置（webdavProxy）：'' = SELFHOST.webProxy 优先（自托管构建），否则官方内置；
+  // 自定义地址 = 用它；'direct' = 真直连（不再回落任何中转，服务商不放行跨域时按连接失败如实提示）。
+  // Quicker 桌面宿主无此限制，恒为直连。
   var DEFAULT_WEB_PROXY = 'https://proxy.zhinote.net';
   function proxyPrefix() {
     if (window.host && window.host.caps && window.host.caps.quicker) return '';
