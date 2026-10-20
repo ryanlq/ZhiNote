@@ -16,8 +16,8 @@
  * 用户仍可在 设置 → 同步 里按需覆盖（direct / 自定义地址 / 关闭），本文件只决定「默认值」。
  */
 window.SELFHOST = {
-  webProxy: 'https://zhinote-proxy.ryan-lq.workers.dev',
-  relay: 'wss://zhinote-relay.ryan-lq.workers.dev',
+  webProxy: 'https://zhinote-proxy.serenityhub.top',
+  relay: 'wss://zhinote-relay.serenityhub.top',
   emojiHost: ''
 };
 if (window.SELFHOST.emojiHost) {
