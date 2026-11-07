@@ -7,7 +7,9 @@
  * 注意：Authorization 头（网盘账号密码）会经过本 Worker——请部署在自己的账号里。
  */
 const ALLOW_METHODS = 'GET,HEAD,PUT,POST,DELETE,MKCOL,PROPFIND,MOVE,COPY,OPTIONS';
-const PASS_HEADERS = ['authorization', 'content-type', 'depth', 'destination', 'overwrite', 'if-match', 'if-none-match'];
+// accept：MCP 服务器靠它协商 JSON/SSE 响应，必须透传（不能再用默认的 */* 覆盖）；
+// mcp-* / last-event-id：远程 MCP（Streamable HTTP）的会话与协议版本头
+const PASS_HEADERS = ['authorization', 'content-type', 'accept', 'depth', 'destination', 'overwrite', 'if-match', 'if-none-match', 'mcp-session-id', 'mcp-protocol-version', 'last-event-id'];
 
 export default {
   async fetch(request) {
@@ -51,8 +53,8 @@ function corsHeaders(request) {
   return {
     'Access-Control-Allow-Origin': request.headers.get('Origin') || '*',
     'Access-Control-Allow-Methods': ALLOW_METHODS,
-    'Access-Control-Allow-Headers': 'Authorization, Content-Type, Depth, Destination, Overwrite, If-Match, If-None-Match, Cache-Control, Pragma',
-    'Access-Control-Expose-Headers': 'ETag, Content-Length, Content-Type, DAV, Last-Modified',
+    'Access-Control-Allow-Headers': 'Authorization, Content-Type, Accept, Depth, Destination, Overwrite, If-Match, If-None-Match, Cache-Control, Pragma, Mcp-Session-Id, MCP-Protocol-Version, Last-Event-ID',
+    'Access-Control-Expose-Headers': 'ETag, Content-Length, Content-Type, DAV, Last-Modified, Mcp-Session-Id',
     'Access-Control-Max-Age': '86400',
   };
 }

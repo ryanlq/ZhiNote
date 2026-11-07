@@ -154,6 +154,7 @@
       + '<div class="mascot-quick" id="mascot-quick"></div>'
     + '<div class="mascot-input">'
     + '<button type="button" class="mascot-ctx mascot-cmdbtn" id="mascot-cmd" title="常用语（存下常问的话，一点就问）" aria-label="常用语">⚡</button>'
+    + '<button type="button" class="mascot-ctx" id="mascot-tools" title="工具模式：允许小枝搜索/新建/修改笔记（写入前会提示）" aria-label="工具模式">🔧</button>'
     + '<button type="button" class="mascot-ctx" id="mascot-ctx" title="选择随问题带上的笔记" aria-label="选择笔记">📄<span class="mascot-ctx-t"></span></button>'
     + '<textarea id="mascot-ta" rows="1" placeholder="问小枝…" title="Enter 发送，Shift+Enter 换行"></textarea>'
       + '<button type="button" class="mascot-send" id="mascot-send" title="发送" aria-label="发送">'
@@ -1170,6 +1171,44 @@
     return { el: d, txt: t };
   }
 
+  // ===== 工具模式（agent.js）：开关、工具状态行、执行确认卡 =====
+  function toolsOn() { return lget('_aiToolsOn') === '1'; }
+  /** 工具执行的状态行：🔧 工具名(参数摘要) → 执行中/✓/✗，样式与思考过程一致 */
+  function mkToolRow(col, bubble, name, args) {
+    var d = document.createElement('div'); d.className = 'mascot-toolrow';
+    var head = document.createElement('div'); head.className = 'mascot-toolrow-h';
+    var argStr = '';
+    try {
+      var parts = [];
+      for (var k in (args || {})) { var v = String(args[k]); parts.push(k + '=' + (v.length > 40 ? v.slice(0, 40) + '…' : v)); }
+      argStr = parts.join(', ');
+    } catch (_) {}
+    head.textContent = '🔧 ' + name + (argStr ? '(' + argStr + ')' : '') + ' …';
+    d.appendChild(head);
+    col.insertBefore(d, bubble);
+    return {
+      el: d,
+      end: function (ok) { head.textContent = head.textContent.replace(/ …$/, '') + (ok ? ' ✓' : ' ✗'); d.classList.add(ok ? 'ok' : 'bad'); },
+    };
+  }
+  /** 危险/远程工具执行前的确认卡（仿记忆确认卡）；resolve(true)=允许 */
+  function askToolConfirm(col, tc) {
+    return new Promise(function (resolve) {
+      var card = document.createElement('div'); card.className = 'mascot-memask';
+      var argStr = '';
+      try { argStr = JSON.stringify(tc.args || {}); } catch (_) { argStr = String(tc.raw || ''); }
+      if (argStr.length > 160) argStr = argStr.slice(0, 160) + '…';
+      var txt = document.createElement('span'); txt.className = 'mascot-memask-t';
+      txt.textContent = '小枝请求执行「' + tc.name + '」' + (argStr && argStr !== '{}' ? '：' + argStr : '') + '，允许吗？';
+      var yes = document.createElement('button'); yes.type = 'button'; yes.className = 'mascot-act'; yes.textContent = '允许';
+      var no = document.createElement('button'); no.type = 'button'; no.className = 'mascot-act'; no.textContent = '拒绝';
+      yes.addEventListener('click', function () { card.remove(); resolve(true); });
+      no.addEventListener('click', function () { card.remove(); resolve(false); });
+      card.appendChild(txt); card.appendChild(yes); card.appendChild(no);
+      col.appendChild(card); scrollChat();
+    });
+  }
+
   function addActions(wrap, getText, range, q) {
     var bar = document.createElement('div'); bar.className = 'mascot-acts';
     var copyBtn = document.createElement('button'); copyBtn.type = 'button'; copyBtn.className = 'mascot-act'; copyBtn.textContent = '复制';
@@ -1212,10 +1251,8 @@
     setMood(opts.mood || 'think');
     var full = '', think = null, moodShown = false;
     _abort = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-    ai().chat({
-      messages: _messages.slice(),
-      noteContext: opts.noteCtx != null ? opts.noteCtx : ctxPickCtx(),
-      signal: _abort ? _abort.signal : undefined,
+    // 两种模式共用的回调：普通对话（ai.chat）与工具模式（aiAgent.run）行为一致
+    var cbs = {
       onThink: function (piece, all) {
         if (!ai().showThink()) return;
         if (!think) think = mkThink(a.col, a.bubble);
@@ -1252,6 +1289,38 @@
         _messages.pop(); _streaming = false; setSendState(false); scrollChat(); flashMood('oops', 1600); renderQuick();
       },
       onAbort: function () { a.bubble.classList.remove('mascot-typing'); if (!full) a.wrap.remove(); _messages.pop(); _streaming = false; setSendState(false); renderQuick(); },
+    };
+    // 工具模式：走 agent 循环（搜索/新建/改笔记等本地工具 + MCP 远程工具）
+    if (toolsOn() && window.aiAgent) {
+      var toolRow = null; // 当前工具的状态行（一轮只有一个在跑，串行执行）
+      window.aiAgent.run({
+        messages: _messages.slice(),
+        noteContext: opts.noteCtx != null ? opts.noteCtx : ctxPickCtx(),
+        signal: _abort ? _abort.signal : undefined,
+        onDelta: cbs.onDelta, onThink: cbs.onThink,
+        onToolStart: function (name, args) {
+          toolRow = mkToolRow(a.col, a.bubble, name, args);
+          scrollChat();
+        },
+        onToolEnd: function (name, ok) {
+          if (toolRow) toolRow.end(ok);
+          toolRow = null; scrollChat();
+        },
+        onConfirm: function (tc) { return askToolConfirm(a.col, tc); },
+      }).then(function (finalText) { cbs.onDone(finalText); }, function (err) {
+        if (err && err.name === 'AbortError') cbs.onAbort(); else cbs.onError(err);
+      });
+      return;
+    }
+    ai().chat({
+      messages: _messages.slice(),
+      noteContext: opts.noteCtx != null ? opts.noteCtx : ctxPickCtx(),
+      signal: _abort ? _abort.signal : undefined,
+      onThink: cbs.onThink,
+      onDelta: cbs.onDelta,
+      onDone: cbs.onDone,
+      onError: cbs.onError,
+      onAbort: cbs.onAbort,
     });
   }
 
@@ -1286,7 +1355,12 @@
   function histList() { try { var a = JSON.parse(lget(HIST_KEY) || '[]'); return Array.isArray(a) ? a : []; } catch (_) { return []; } }
   function histSaveCurrent() {
     if (!_histDirty || !_messages.length) return;
-    var m = _messages.slice(0, 40).map(function (x) { return { role: x.role, content: String(x.content || '').slice(0, 6000) }; });
+    // 只留 user/assistant 文本消息（工具调用过程是显示层，不入历史；防御性过滤）
+    var m = [];
+    _messages.slice(0, 40).forEach(function (x) {
+      if (x.role !== 'user' && x.role !== 'assistant') return;
+      m.push({ role: x.role, content: String(x.content || '').slice(0, 6000) });
+    });
     var a = histList(); a.unshift({ t: Date.now(), m: m });
     lset(HIST_KEY, JSON.stringify(a.slice(0, HIST_MAX)));
     _histDirty = false;
@@ -1362,6 +1436,15 @@
       if (!ta) return; var v = ta.value; ta.value = ''; autoGrow(ta); send(v);
     });
     if (model) model.addEventListener('click', function () { openModelMenu(model, populateModel); });
+    var toolsBtn = _root.querySelector('#mascot-tools');
+    if (toolsBtn) {
+      toolsBtn.classList.toggle('on', toolsOn());
+      toolsBtn.addEventListener('click', function () {
+        var on = !toolsOn();
+        try { lset('_aiToolsOn', on ? '1' : '0'); } catch (_) {}
+        toolsBtn.classList.toggle('on', on);
+      });
+    }
     if (q) q.addEventListener('click', function (e) {
       var b = e.target.closest('.mascot-chip'); if (!b) return;
       if (b.dataset.cmdi != null) runCmdFlat(parseInt(b.dataset.cmdi, 10));
@@ -1691,7 +1774,7 @@
     var A = ai(); if (!A) return '';
     var c = A.getConfig();
     var isCustom = c.providerId === 'custom';
-    var models = (c.provider.models || []);
+    var models = A.modelOptions(); // 预设清单可能过期：拉取过的用实时缓存（ai.js）
     var provOpts = A.PROVIDERS.map(function (p) { return '<option value="' + p.id + '"' + (p.id === c.providerId ? ' selected' : '') + '>' + esc(p.name) + '</option>'; }).join('');
     var modelCtrl = (isCustom || !models.length)
       ? '<input type="text" class="mascot-inp" id="ai-model" placeholder="模型名，如 deepseek-chat" value="' + esc(c.model) + '">'
@@ -1699,18 +1782,22 @@
     var h = '<div class="mascot-sec">接入模型</div>';
     h += '<div class="mascot-frow"><label>服务商</label><select class="mascot-inp" id="ai-prov">' + provOpts + '</select></div>';
     if (c.provider.note) h += '<div class="mascot-note">' + esc(c.provider.note) + (c.provider.keyUrl ? ' · <a href="#" id="ai-getkey" data-url="' + esc(c.provider.keyUrl) + '">获取 API key ↗</a>' : '') + '</div>';
-    h += '<div class="mascot-frow"><label>模型</label>' + modelCtrl + '</div>';
-    h += '<div class="mascot-frow"><label>接口地址</label><input type="text" class="mascot-inp" id="ai-base" value="' + esc(c.base) + '"' + (isCustom ? '' : ' readonly') + '></div>';
-    h += '<div class="mascot-frow"><label>API Key</label><span class="mascot-keywrap">'
-      + '<input type="password" class="mascot-inp" id="ai-key" autocomplete="off" placeholder="sk-…" value="' + esc(A.getKey()) + '">'
+    h += '<div class="mascot-frow"><label>模型</label>' + modelCtrl
+      + '<button type="button" class="mascot-btn" id="ai-models-btn" title="从服务商实时拉取最新模型列表（预设清单可能过期下架）">拉取</button></div>';
+    h += '<div class="mascot-frow"><label>接口地址</label><input type="text" class="mascot-inp" id="ai-base" value="' + esc(c.base) + '"' + ((isCustom || c.provider.freeBase) ? '' : ' readonly') + '></div>';
+    h += '<div class="mascot-frow"><label>API Key' + (c.provider.keyOptional ? '<small>（可选）</small>' : '') + '</label><span class="mascot-keywrap">'
+      + '<input type="password" class="mascot-inp" id="ai-key" autocomplete="off" placeholder="' + (c.provider.keyOptional ? '可留空' : 'sk-…') + '" value="' + esc(A.getKey()) + '">'
       + '<button type="button" class="pass-eye-btn" id="ai-key-eye" title="显示/隐藏">'
       + '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>'
       + '</button></span></div>';
     h += '<div class="mascot-frow mascot-frow-end">'
       + '<span class="mascot-status' + (A.isConfigured() ? ' ok' : '') + '" id="ai-status">' + (A.isConfigured() ? '已就绪' : '待配置') + '</span>'
+      + (A.balanceSupported() ? '<button type="button" class="mascot-btn" id="ai-balance-btn" title="查询该服务商账户余额">查余额</button>' : '')
       + '<button type="button" class="mascot-btn" id="ai-test">测试连接</button></div>';
     h += row('显示深度思考', '推理型模型答题前的思考过程，可随时点开/收起；关闭则只看答案', '<span class="mascot-sw' + (A.showThink() ? ' on' : '') + '" id="think-sw" role="switch" tabindex="0"></span>');
     h += cmdSettingsHtml(A);
+    h += skillsSettingsHtml(A);
+    h += mcpSettingsHtml(A);
     h += memSettingsHtml(A);
     return h;
   }
@@ -1821,6 +1908,29 @@
     if (getk) getk.addEventListener('click', function (e) { e.preventDefault(); try { window.open(getk.dataset.url, '_blank'); } catch (_) {} });
     var test = _panelSetEl.querySelector('#ai-test');
     if (test) test.addEventListener('click', function () { aiTest(test); });
+    // 拉取模型列表：成功后用缓存重绘（原选中的模型还在清单里就保持选中）
+    var mb = _panelSetEl.querySelector('#ai-models-btn');
+    if (mb) mb.addEventListener('click', function () {
+      mb.disabled = true; var old = mb.textContent; mb.textContent = '拉取中…';
+      setStatus('', '正在拉取模型列表…');
+      A.refreshModels(function (err, list) {
+        mb.disabled = false; mb.textContent = old;
+        if (err) { setStatus('err', (err && err.message) || '拉取失败'); return; }
+        rerender();
+        setStatus('ok', '拉到 ' + list.length + ' 个模型');
+      });
+    });
+    // 查余额（仅实现了有公开接口的服务商：DeepSeek / Kimi）
+    var bb = _panelSetEl.querySelector('#ai-balance-btn');
+    if (bb) bb.addEventListener('click', function () {
+      bb.disabled = true; var old2 = bb.textContent; bb.textContent = '查询中…';
+      setStatus('', '正在查询余额…');
+      A.fetchBalance(function (err, text) {
+        bb.disabled = false; bb.textContent = old2;
+        if (err) setStatus('err', (err && err.message) || '查询失败');
+        else setStatus('ok', '余额 ' + text);
+      });
+    });
     var tsw = _panelSetEl.querySelector('#think-sw');
     if (tsw) {
       var tt = function () { A.setShowThink(!A.showThink()); rerender(); };
@@ -1828,6 +1938,8 @@
       tsw.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); tt(); } });
     }
     cmdBind(A);
+    skillsBind(A);
+    mcpBind(A);
     memBind(A);
   }
   var _cmdFoldOpen = null; // 常用语折叠的展开状态：跨 rerender 保持（改一条就整段重绘）
@@ -1874,6 +1986,181 @@
     });
     box.addEventListener('keydown', function (e) {
       if (e.key === 'Enter' && !e.isComposing && e.target.classList.contains('cmd-newt')) { e.preventDefault(); doAdd(gi(e.target)); }
+    });
+  }
+  var _skillsFoldOpen = null; // 技能折叠的展开状态：跨 rerender 保持（同常用语 _cmdFoldOpen）
+  /** 技能设置区：开关式行为预设（skills.js），开启后并入每轮对话的系统提示 */
+  function skillsSettingsHtml(A) {
+    var S = window.aiSkills; if (!S) return '';
+    var groups = S.groups(), total = 0, onCnt = 0;
+    groups.forEach(function (g) { (g.items || []).forEach(function (it) { total++; if (it.on === '1') onCnt++; }); });
+    var del = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>';
+    var h = '<div class="mascot-sec">技能</div>';
+    h += '<details class="mascot-row mascot-row-col mascot-avafold" id="skills-fold"' + ((_skillsFoldOpen != null ? _skillsFoldOpen : !total) ? ' open' : '') + '>'
+      + '<summary><span class="mascot-lbl">技能预设<small>开启后并入每轮对话，让小枝长期扮演某种工作方式（与常用语的一次性指令不同）</small>'
+      + '<span class="mascot-fold-x">' + (onCnt ? '开 ' + onCnt + ' / ' : '') + total + ' 条<span class="mascot-avafold-caret">▾</span></span></span></summary>'
+      + '<div id="skills-groups">';
+    groups.forEach(function (g, gi) {
+      h += '<div class="mascot-cmdg">'
+        + '<div class="mascot-cmdg-head">'
+        + '<input type="text" class="mascot-inp mascot-cmdg-name" data-gi="' + gi + '" value="' + esc(g.n) + '" maxlength="12" title="分组名，改完即存">'
+        + '<span class="mascot-fold-n">' + (g.items || []).length + ' 条</span>'
+        + '<button type="button" class="mascot-memdel skg-del" data-gi="' + gi + '" title="删除整组（连同组内技能）">' + del + '</button>'
+        + '</div><div class="mascot-memlist">';
+      (g.items || []).forEach(function (it, ii) {
+        h += '<div class="mascot-memrow">'
+          + '<button type="button" class="mascot-emobtn sk-emo" data-gi="' + gi + '" data-ii="' + ii + '" title="换图标">' + esc(it.e || '🧭') + '</button>'
+          + '<input type="text" class="mascot-inp mascot-cmdname sk-name" data-gi="' + gi + '" data-ii="' + ii + '" value="' + esc(it.n || '') + '" maxlength="20" placeholder="名称" title="技能名（自用备注）">'
+          + '<span class="mascot-sw' + (it.on === '1' ? ' on' : '') + ' sk-sw" data-gi="' + gi + '" data-ii="' + ii + '" role="switch" tabindex="0" title="' + (it.on === '1' ? '已启用，点一下停用' : '已停用，点一下启用') + '"></span>'
+          + '<button type="button" class="mascot-memdel sk-del" data-gi="' + gi + '" data-ii="' + ii + '" title="删除这条">' + del + '</button>'
+          + '</div>'
+          + '<textarea class="mascot-inp mascot-skillp" data-gi="' + gi + '" data-ii="' + ii + '" rows="2" maxlength="2000" placeholder="技能提示词：描述希望小枝怎么回答（改完即存）">' + esc(it.p || '') + '</textarea>';
+      });
+      h += '<div class="mascot-memrow">'
+        + '<button type="button" class="mascot-emobtn sk-newe" data-gi="' + gi + '" data-e="🧭" title="选个图标">🧭</button>'
+        + '<input type="text" class="mascot-inp mascot-meminp sk-newn" data-gi="' + gi + '" placeholder="技能名" maxlength="20">'
+        + '<button type="button" class="mascot-btn sk-addbtn" data-gi="' + gi + '" title="添加后去填写提示词">添加</button></div>';
+      h += '</div></div>';
+    });
+    h += '<div class="mascot-frow"><button type="button" class="mascot-btn" id="skills-addgroup">＋ 新建分组</button></div>';
+    h += '</div></details>';
+    return h;
+  }
+  function skillsBind(A) {
+    var S = window.aiSkills; if (!S || !_panelSetEl) return;
+    var fold = _panelSetEl.querySelector('#skills-fold');
+    if (fold) fold.addEventListener('toggle', function () { _skillsFoldOpen = fold.open; });
+    var box = _panelSetEl.querySelector('#skills-groups');
+    if (!box) return;
+    function gi(el) { return parseInt(el.dataset.gi, 10); }
+    function ii(el) { return parseInt(el.dataset.ii, 10); }
+    box.addEventListener('change', function (e) {
+      var t = e.target;
+      if (t.classList.contains('mascot-cmdg-name')) { S.renameGroup(gi(t), t.value); rerender(); }
+      else if (t.classList.contains('sk-name')) { S.updateItem(gi(t), ii(t), { n: t.value }); rerender(); }
+      else if (t.classList.contains('mascot-skillp')) { S.updateItem(gi(t), ii(t), { p: t.value }); }
+    });
+    box.addEventListener('click', function (e) {
+      var emo = e.target.closest('.sk-emo');
+      if (emo) { openEmojiPick(emo, function (em) { S.updateItem(gi(emo), ii(emo), { e: em }); rerender(); }, (emo.textContent || '').trim()); return; }
+      var ne = e.target.closest('.sk-newe');
+      if (ne) { openEmojiPick(ne, function (em) { ne.dataset.e = em; ne.textContent = em; }, ne.dataset.e || ''); return; }
+      var sw = e.target.closest('.sk-sw');
+      if (sw) {
+        var g = S.groups()[gi(sw)], it = g && (g.items || [])[ii(sw)];
+        if (it) S.toggle(gi(sw), ii(sw), it.on !== '1');
+        rerender(); return;
+      }
+      var del = e.target.closest('.sk-del');
+      if (del) { S.removeItem(gi(del), ii(del)); rerender(); return; }
+      var gdel = e.target.closest('.skg-del');
+      if (gdel) { // 删组连带删技能：先点一下变红确认，再点才删（同常用语删组）
+        if (gdel.dataset.arm) { S.removeGroup(gi(gdel)); rerender(); }
+        else { gdel.dataset.arm = '1'; gdel.classList.add('arm'); gdel.title = '再点一次确认删除整组'; setTimeout(function () { if (gdel.isConnected) { delete gdel.dataset.arm; gdel.classList.remove('arm'); gdel.title = '删除整组（连同组内技能）'; } }, 2500); }
+        return;
+      }
+      var addBtn = e.target.closest('.sk-addbtn');
+      if (addBtn) {
+        var gI = gi(addBtn);
+        var nameInp = box.querySelector('.sk-newn[data-gi="' + gI + '"]');
+        var emoBtn = box.querySelector('.sk-newe[data-gi="' + gI + '"]');
+        _skillsFoldOpen = true;
+        S.addItem(gI, { e: (emoBtn && emoBtn.dataset.e) || '🧭', n: nameInp ? nameInp.value : '', p: '' });
+        rerender();
+        var p2 = _panelSetEl.querySelector('.mascot-skillp[data-ii="' + ((S.groups()[gI].items || []).length - 1) + '"][data-gi="' + gI + '"]');
+        if (p2) try { p2.focus(); } catch (_) {}
+      }
+      var ag = e.target.closest('#skills-addgroup');
+      if (ag) { _skillsFoldOpen = true; S.addGroup('新分组'); rerender(); }
+    });
+  }
+  var _mcpFoldOpen = null; // MCP 折叠状态：跨 rerender 保持
+  /** MCP 设置区：远程 MCP 服务器（Streamable HTTP）清单，工具动态并入 agent 的工具注册表 */
+  function mcpSettingsHtml(A) {
+    var M = window.aiMcp; if (!M) return '';
+    var list = M.servers(), total = 0;
+    list.forEach(function (s) { if (s.url) total++; });
+    var del = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>';
+    var h = '<div class="mascot-sec">MCP 工具（远程）</div>';
+    h += '<details class="mascot-row mascot-row-col mascot-avafold" id="mcp-fold"' + ((_mcpFoldOpen != null ? _mcpFoldOpen : !list.length) ? ' open' : '') + '>'
+      + '<summary><span class="mascot-lbl">远程 MCP 服务器<small>填支持 Streamable HTTP 的服务地址；其工具并入工具模式，跨域默认走中转（也可直连）</small>'
+      + '<span class="mascot-fold-x">' + total + ' 台<span class="mascot-avafold-caret">▾</span></span></span></summary>'
+      + '<div id="mcp-list">';
+    if (!list.length) {
+      h += '<div class="mascot-note">还没有配置。把支持 MCP（Streamable HTTP）的服务地址填进来，它的工具就会出现在工具模式的注册表里。</div>';
+    }
+    list.forEach(function (s, i) {
+      h += '<div class="mascot-cmdg mcp-srv" data-sid="' + esc(s.id) + '">'
+        + '<div class="mascot-memrow">'
+        + '<input type="text" class="mascot-inp mcp-name" data-i="' + i + '" value="' + esc(s.name) + '" maxlength="30" placeholder="名称" title="服务器名称（自用备注）">'
+        + '<select class="mascot-inp mcp-mode" data-i="' + i + '" title="跨域方式：中转=走跨域代理；直连=服务器自己放行 CORS">'
+        + '<option value="proxy"' + (s.mode !== 'direct' ? ' selected' : '') + '>中转</option>'
+        + '<option value="direct"' + (s.mode === 'direct' ? ' selected' : '') + '>直连</option>'
+        + '</select>'
+        + '<button type="button" class="mascot-memdel mcp-del" data-i="' + i + '" title="删除这台服务器">' + del + '</button>'
+        + '</div>'
+        + '<div class="mascot-memrow"><input type="text" class="mascot-inp mcp-url" data-i="' + i + '" value="' + esc(s.url) + '" placeholder="https://…（MCP Streamable HTTP 地址）" title="改完即存"></div>'
+        + '<div class="mascot-memrow">'
+        + '<input type="password" class="mascot-inp mcp-token" data-i="' + i + '" value="' + esc(M.tokenOf(s.id)) + '" placeholder="Bearer Token（可选，只存本机）" autocomplete="off" title="需要鉴权的服务器才填；只保存在本机，不上云">'
+        + '<button type="button" class="mascot-btn mcp-test" data-i="' + i + '">测试</button>'
+        + '</div>'
+        + '<div class="mascot-note mcp-status" data-i="' + i + '"></div>'
+        + '</div>';
+    });
+    h += '<div class="mascot-frow"><button type="button" class="mascot-btn" id="mcp-add">＋ 添加服务器</button>'
+      + '<button type="button" class="mascot-btn" id="mcp-refresh" title="重新拉取所有服务器的工具清单">刷新工具</button></div>';
+    h += '</div></details>';
+    return h;
+  }
+  function mcpBind(A) {
+    var M = window.aiMcp; if (!M || !_panelSetEl) return;
+    var fold = _panelSetEl.querySelector('#mcp-fold');
+    if (fold) fold.addEventListener('toggle', function () { _mcpFoldOpen = fold.open; });
+    var box = _panelSetEl.querySelector('#mcp-list');
+    if (!box) return;
+    function si(el) { return parseInt(el.dataset.i, 10); }
+    function srv(el) { return M.servers()[si(el)]; }
+    function statusEl(i) { return box.querySelector('.mcp-status[data-i="' + i + '"]'); }
+    box.addEventListener('change', function (e) {
+      var t = e.target, s = srv(t); if (!s) return;
+      if (t.classList.contains('mcp-name')) { M.updateServer(s.id, { name: t.value }); }
+      else if (t.classList.contains('mcp-url')) { M.updateServer(s.id, { url: t.value }); rerender(); }
+      else if (t.classList.contains('mcp-mode')) { M.updateServer(s.id, { mode: t.value }); }
+      else if (t.classList.contains('mcp-token')) { M.setToken(s.id, t.value.trim()); }
+    });
+    box.addEventListener('click', function (e) {
+      var del = e.target.closest('.mcp-del');
+      if (del) { // 删服务器连 token/会话一起清：先点确认再删
+        if (del.dataset.arm) { var s = srv(del); if (s) M.removeServer(s.id); rerender(); }
+        else { del.dataset.arm = '1'; del.classList.add('arm'); del.title = '再点一次确认删除'; setTimeout(function () { if (del.isConnected) { delete del.dataset.arm; del.classList.remove('arm'); del.title = '删除这台服务器'; } }, 2500); }
+        return;
+      }
+      var test = e.target.closest('.mcp-test');
+      if (test) {
+        var s2 = srv(test); if (!s2) return;
+        var st = statusEl(si(test));
+        test.disabled = true; var old = test.textContent; test.textContent = '测试中…';
+        if (st) { st.textContent = '正在连接…'; st.className = 'mascot-note mcp-status'; }
+        M.testServer(s2.id).then(function (r) {
+          if (st) { st.textContent = '✓ 连接成功，' + r.count + ' 个工具已并入工具模式'; st.className = 'mascot-note mcp-status ok'; }
+        }, function (err) {
+          var msg = (err && err.message) || '连接失败';
+          if (s2.mode !== 'direct' && /404|400|session|会话/i.test(msg)) msg += '（中转可能未升级 MCP 头透传，试试改「直连」）';
+          if (st) { st.textContent = '✗ ' + msg; st.className = 'mascot-note mcp-status bad'; }
+        }).then(function () { test.disabled = false; test.textContent = old; });
+        return;
+      }
+      if (e.target.closest('#mcp-add')) { _mcpFoldOpen = true; M.addServer('MCP 服务器', ''); rerender(); }
+      var rf = e.target.closest('#mcp-refresh');
+      if (rf) {
+        rf.disabled = true; var o2 = rf.textContent; rf.textContent = '刷新中…';
+        M.refreshAll().then(function (rs) {
+          var okCnt = 0, n = 0;
+          rs.forEach(function (r) { n++; if (r.ok) okCnt++; });
+          rf.disabled = false; rf.textContent = o2;
+          if (_panelSetEl) setStatus('ok', '工具刷新完成：' + okCnt + '/' + n + ' 台服务器');
+        }, function () { rf.disabled = false; rf.textContent = o2; });
+      }
     });
   }
   function memBind(A) {

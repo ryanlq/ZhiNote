@@ -5859,6 +5859,11 @@ html.applock-showing body.pwa-standalone .applock-overlay { top: 0; }
 .mascot-think summary::-webkit-details-marker, .zc-think summary::-webkit-details-marker { display: none; }
 .mascot-think summary:hover, .zc-think summary:hover { color: var(--text-secondary); background: var(--bg-hover); }
 .mascot-think-t, .zc-think-t { max-height: 110px; overflow-y: auto; margin-top: 5px; padding: 4px 0 4px 9px; border-left: 2px solid var(--border-strong); line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
+/* 工具模式：工具执行状态行（与思考过程同款小字，带执行结果标记） */
+.mascot-toolrow { margin: 2px 0 5px; font-size: 11px; color: var(--text-tertiary); max-width: 100%; }
+.mascot-toolrow .mascot-toolrow-h { display: inline-block; padding: 2px 9px; border-radius: 999px; border: 1px dashed var(--border-strong); white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.mascot-toolrow.ok .mascot-toolrow-h { color: var(--ok, #3a9e5f); border-color: currentColor; border-style: solid; }
+.mascot-toolrow.bad .mascot-toolrow-h { color: var(--danger, #c25a5a); border-color: currentColor; border-style: solid; }
 .mascot-acts { display: flex; gap: 6px; margin-top: 5px; flex-wrap: wrap; }
 .mascot-act { font-size: 11px; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--border-strong); background: transparent; color: var(--text-secondary); cursor: pointer; }
 .mascot-act:hover { background: var(--bg-hover); color: var(--text); }
@@ -6131,6 +6136,8 @@ body.readonly-mode .zc-ask, body.sync-protection-mode .zc-ask { display: none; }
 .mascot-emobtn:hover { background: var(--bg-hover); }
 .mascot-cmdname { flex: 0 0 76px; font-size: 12.5px; padding: 5px 8px; }
 @media (max-width: 480px) { .mascot-cmdname { flex-basis: 60px; } }
+/* 技能提示词多行编辑（skills.js 设置区，占满一行、垂直伸缩） */
+.mascot-skillp { width: 100%; flex: none; margin: 2px 0 6px; resize: vertical; min-height: 44px; max-height: 160px; font: inherit; font-size: 12.5px; line-height: 1.5; }
 
 /* ===== 引用胶囊 / 通栏入口 ===== */
 #editor .ProseMirror .zn-mention {

@@ -33,6 +33,13 @@
     { id: 'gemini', name: 'Google Gemini', base: 'https://generativelanguage.googleapis.com/v1beta/openai',
       models: ['gemini-3.5-flash', 'gemini-3.1-pro', 'gemini-2.5-flash'],
       keyUrl: 'https://aistudio.google.com/apikey', note: '兼容端点（需海外网络）' },
+    // Ollama：OpenAI 兼容接口（/v1）。key 必填但值随意（Ollama 只要求非空，如 ollama）；
+    // base 可自由编辑（freeBase）——默认本机，远端部署时改成你的主机地址。
+    // 注意：网页端浏览器直连 http 会被跨域拦（服务端需设 OLLAMA_ORIGINS 放行，或挂 https 反代）；
+    // Quicker 桌面端无此限制，直连即可。
+    { id: 'ollama', name: 'Ollama（本地/自建）', base: 'http://localhost:11434/v1',
+      models: [], keyUrl: 'https://ollama.com/download',
+      note: 'OpenAI 兼容接口；API key 可留空；接口地址改成你的远端主机；网页端跨域需 OLLAMA_ORIGINS 放行，桌面端直连即可', freeBase: true, keyOptional: true },
     { id: 'custom', name: '自定义（其它兼容 OpenAI 的服务）', base: '',
       models: [], keyUrl: '', note: '自己填接口地址和模型名' },
   ];
@@ -164,7 +171,7 @@
   function getConfig() {
     var pid = gs(SK.provider, 'deepseek');
     var p = provOf(pid);
-    var base = gs(SK.base, '') || p.base;
+    var base = getBase() || p.base;
     var model = gs(SK.model, '') || (p.models[0] || '');
     return { providerId: pid, provider: p, base: base, model: model, key: getKey(),
       temp: parseFloat(gs(SK.temp, '0.6')) || 0.6, sysPrompt: gs(SK.sysPrompt, '') };
@@ -172,11 +179,99 @@
   function setProvider(pid) {
     var p = provOf(pid);
     ss(SK.provider, pid);
-    if (pid !== 'custom') { ss(SK.base, p.base); if (p.models.length) ss(SK.model, p.models[0]); }
+    // custom 与 freeBase（Ollama 等）的地址不回填：用户改过的远端地址在切换服务商后要保住；
+    // 首次选入（地址为空）才填预设值
+    if (pid !== 'custom' && !(p.freeBase && gs(SK.base, ''))) ss(SK.base, p.base);
+    if (p.models.length) ss(SK.model, p.models[0]);
   }
   function setModel(m) { ss(SK.model, m); }
-  function setBase(b) { ss(SK.base, (b || '').trim()); }
-  function isConfigured() { var c = getConfig(); return !!(c.base && c.model && c.key); }
+  // 接口地址里带 "user:pass@" 的（自建网关常见写法）：凭据摘出来只存本机（_ 前缀不上云），
+  // 地址本体保持干净再入同步设置——否则密码会跟着 base 上云（setBase 入口 + 老数据懒迁移双保险）。
+  var URLAUTH_KEY = '_aiUrlAuths';
+  function _urlAuthMap() { try { var o = JSON.parse(gs(URLAUTH_KEY, '{}')); return (o && typeof o === 'object') ? o : {}; } catch (_) { return {}; } }
+  function _cleanBase(b) {
+    var sa = _splitAuth(b);
+    if (sa.auth) {
+      var m = _urlAuthMap();
+      if (m[sa.url] !== sa.auth) { m[sa.url] = sa.auth; ss(URLAUTH_KEY, JSON.stringify(m)); }
+      return sa.url;
+    }
+    return String(b || '').trim();
+  }
+  function _authFor(base) { return _urlAuthMap()[base] || ''; }
+  /** 当前生效的 base（干净地址；老数据里带的凭据自动迁移进本机 map 并回写，同步设置里不再留密码） */
+  function getBase() {
+    var b = String(gs(SK.base, '') || '').trim();
+    var c = _splitAuth(b);
+    if (!c.auth) return b;
+    b = _cleanBase(b);
+    ss(SK.base, b); // 一次性迁移：把带凭据的地址替换成干净版（凭据已在 _cleanBase 存进本机 map）
+    return b;
+  }
+  function setBase(b) { ss(SK.base, _cleanBase(b)); }
+  // key 是否必填：Ollama 等自建服务不校验 key（keyOptional 标记）
+  function keyRequired() { return !provOf(gs(SK.provider, 'deepseek')).keyOptional; }
+  // 自建服务（key 可选）收到 401/403 时的提示：多半是前置网关（nginx 等）要求鉴权，不是没填 key
+  function _gwHint() { return '（自建服务的网关要求鉴权：在 API Key 里填访问令牌，或「用户名:密码」走 Basic 认证；若网关不设鉴权则检查其配置放行）'; }
+  function isConfigured() { var c = getConfig(); return !!(c.base && c.model && (c.key || !keyRequired())); }
+
+  // ===== 模型列表拉取 / 余额查询（设置页用）=====
+  // 预设服务商的模型清单会过期下架，自定义/Ollama 又只能手填——统一走 OpenAI 兼容的
+  // GET /models 实时拉取，结果按「服务商::接口地址」缓存（随设置云同步，换设备免重拉）。
+  var MC_KEY = 'aiModelCache';
+  function _modelCache() { try { var o = JSON.parse(gs(MC_KEY, '{}')); return (o && typeof o === 'object') ? o : {}; } catch (_) { return {}; } }
+  /** 当前应展示的模型候选：拉取过的用缓存，否则用预设 */
+  function modelOptions() {
+    var c = getConfig();
+    var cached = _modelCache()[c.providerId + '::' + c.base];
+    if (cached && cached.length) return cached;
+    return c.provider.models || [];
+  }
+  /** 实时拉取 /models 并写缓存。cb(err, ids) */
+  function refreshModels(cb) {
+    var c = getConfig();
+    var auth = _splitAuth(c.base).auth || _authFor(c.base); // base 已是干净地址，兜底取本机 map
+    var url = String(c.base).replace(/\/+$/, '') + '/models';
+    fetch(rawUrl(url), { headers: _headers(c.key, auth) }).then(function (resp) {
+      if (!resp.ok) { return resp.text().then(function (t) { throw new Error(_friendlyErr(resp.status, t, c.key ? '' : _gwHint())); }); }
+      return resp.json();
+    }).then(function (j) {
+      var arr = (j && Array.isArray(j.data)) ? j.data : (Array.isArray(j) ? j : []);
+      var ids = arr.map(function (x) { return x && (x.id || x.name); }).filter(function (x) { return !!x; });
+      if (!ids.length) throw new Error('响应里没有模型列表');
+      ids.sort();
+      var map = _modelCache();
+      map[c.providerId + '::' + c.base] = ids;
+      ss(MC_KEY, JSON.stringify(map));
+      cb && cb(null, ids);
+    }).catch(function (e) {
+      cb && cb(e instanceof Error ? e : new Error(String((e && e.message) || '拉取失败')));
+    });
+  }
+  // 余额：各服务商接口不统一，逐家适配（没公开接口的如实说不支持）。
+  function balanceSupported() { var pid = gs(SK.provider, 'deepseek'); return pid === 'deepseek' || pid === 'kimi'; }
+  /** 查询余额。cb(err, '¥ 110.00' 之类的展示文本) */
+  function fetchBalance(cb) {
+    var c = getConfig();
+    var pid = c.providerId, url, parse;
+    if (pid === 'deepseek') {
+      url = 'https://api.deepseek.com/user/balance';
+      parse = function (j) { var b = (j && j.balance_infos && j.balance_infos[0]) || {}; return (b.total_balance != null) ? ((b.currency || '') + ' ' + b.total_balance).trim() : null; };
+    } else if (pid === 'kimi') {
+      url = 'https://api.moonshot.cn/v1/users/me/balance';
+      parse = function (j) { var d = (j && j.data) || j || {}; var v = (d.total_balance != null) ? d.total_balance : d.available_balance; return (v != null) ? ((d.currency || '') + ' ' + v).trim() : null; };
+    } else { cb && cb(new Error('该服务商未提供余额查询接口')); return; }
+    fetch(rawUrl(url), { headers: _headers(c.key, _authFor(c.base)) }).then(function (resp) {
+      if (!resp.ok) { return resp.text().then(function (t) { throw new Error(_friendlyErr(resp.status, t)); }); }
+      return resp.json();
+    }).then(function (j) {
+      var text = parse(j);
+      if (!text) throw new Error('响应里没有余额字段');
+      cb && cb(null, text);
+    }).catch(function (e) {
+      cb && cb(e instanceof Error ? e : new Error(String((e && e.message) || '查询失败')));
+    });
+  }
 
   // ===== 记忆卡 =====
   // 设计见 docs/小枝AI功能设计与灵感.md 第六节：默认不记（总开关默认关）；
@@ -330,6 +425,40 @@
 
   function endpoint(base) { return String(base || '').replace(/\/+$/, '') + '/chat/completions'; }
 
+  /** 裸地址（/models、余额接口等）走跨域代理：与 requestUrl 同约定但不追加 /chat/completions */
+  function rawUrl(url) {
+    var px = proxyPrefix();
+    return px ? px + '/' + url : url;
+  }
+
+  // 请求头：key 非空才带 Authorization。自建网关兼容（Ollama 常见前置 nginx）：
+  //  - 显式写了 scheme（"Bearer xxx" / "Basic xxx" / "Token xxx"）→ 原样发
+  //  - "用户名:密码" 冒号写法 → 按 nginx auth_basic 转 Basic
+  //  - 其余 → 默认 Bearer
+  // urlAuth：接口地址里带的 "user:pass@"（fetch 禁止 URL 凭据，须摘出来转成头）
+  function _headers(key, urlAuth) {
+    var h = { 'Content-Type': 'application/json' };
+    var b64 = function (s) { return btoa(unescape(encodeURIComponent(s))); };
+    if (key) {
+      if (/^(bearer|basic|token)\s/i.test(key)) h['Authorization'] = key;
+      else if (key.indexOf(':') !== -1) { try { h['Authorization'] = 'Basic ' + b64(key); } catch (_) { h['Authorization'] = 'Basic ' + btoa(key); } }
+      else h['Authorization'] = 'Bearer ' + key;
+    } else if (urlAuth) {
+      try { h['Authorization'] = 'Basic ' + b64(urlAuth); } catch (_) {}
+    }
+    return h;
+  }
+  /** 摘出 base 地址里的 "user:pass@"（浏览器 fetch 直接拒发带凭据的 URL；经代理转发时凭据也会被丢）。
+   *  返回 { url: 干净地址, auth: 'user:pass' 或 '' } */
+  function _splitAuth(base) {
+    var b = String(base || '').trim();
+    var m = b.match(/^(https?:\/\/)([^@/\s]+)@(.+)$/i);
+    if (!m) return { url: b, auth: '' };
+    var info = m[2];
+    try { info = decodeURIComponent(info); } catch (_) {}
+    return { url: m[1] + m[3], auth: info };
+  }
+
   // 网页宿主：AI 服务商不允许浏览器直连（CORS），请求经中转 Worker 转发（与 WebDAV 同一个，转发任意 https 目标）。
   // 复用同步的跨域代理设置（webdavProxy）：'' = SELFHOST.webProxy 优先（自托管构建），否则官方内置；
   // 自定义地址 = 用它；'direct' = 真直连（不再回落任何中转，服务商不放行跨域时按连接失败如实提示）。
@@ -396,8 +525,8 @@
    *  onDelta(piece,full), onThink(piece,fullThink)（思考型模型的推理流，可选）, onDone(full), onError(err), signal } */
   function chat(opts) {
     var c = getConfig();
-    if (!c.base || !c.model) { opts.onError && opts.onError(new Error('还没配置模型，请到设置 → 小枝 填接口地址和模型')); return; }
-    if (!c.key) { opts.onError && opts.onError(new Error('还没填 API key，请到设置 → 小枝 填入')); return; }
+    if (!c.model) { opts.onError && opts.onError(new Error('还没配置模型，请到设置 → 小枝 填接口地址和模型')); return; }
+    if (!c.key && keyRequired()) { opts.onError && opts.onError(new Error('还没填 API key，请到设置 → 小枝 填入')); return; }
 
     var sys = (c.sysPrompt && c.sysPrompt.trim()) ? c.sysPrompt.trim() : _persona;
     // 记忆卡：开了总开关才注入已有记忆、并允许 AI 提议新记忆（标记会被界面剥掉转成确认卡，见 mascot.js）
@@ -405,6 +534,11 @@
       var cards = memList();
       if (cards.length) sys += '\n\n关于这位用户你记得这些（供参考，别复述）：\n' + cards.map(function (m) { return '- ' + m.t; }).join('\n');
       sys += '\n\n若本轮对话透露了值得长期记住的用户信息（职业、习惯、稳定偏好），在回答最后另起一行输出 [[记住: 一句话概括]]（最多一条，不确定就不输出）。';
+    }
+    // 技能（skills.js）：用户开启的技能预设并入系统提示，作为持久行为模式（plain 场景如连接测试不带）
+    if (!opts.plain && window.aiSkills) {
+      var sk = window.aiSkills.activePrompts();
+      if (sk.length) sys += '\n\n【已启用的技能（回答时遵循）】\n' + sk.join('\n---\n');
     }
     // 心情标记（界面会剥掉并演成动图表情；quiet 场景如后台生成不需要）
     if (!opts.plain) {
@@ -428,21 +562,52 @@
       }
     }
     var body = { model: c.model, messages: messages, stream: true, temperature: c.temp };
+    // 地址凭据（"user:pass@"）：优先取地址里现写的，否则取本机 map（setBase 时摘过去的）
+    var sa = _splitAuth(c.base);
+    if (!sa.auth) sa.auth = _authFor(c.base);
+    // 工具调用（agent.js 的 agent 循环用）：带上工具清单，模型可决定调用哪个
+    if (opts.tools && opts.tools.length) { body.tools = opts.tools; body.tool_choice = 'auto'; }
+    // 非流式模式（agent.js 在流式 tool_calls 不被服务商支持时的每轮回退）：
+    // 一次性拿全 message（含 tool_calls），其余回调语义与流式一致
+    if (opts.stream === false) {
+      body.stream = false;
+      fetch(requestUrl(sa.url), {
+        method: 'POST',
+        headers: _headers(c.key, sa.auth),
+        body: JSON.stringify(body),
+        signal: opts.signal,
+      }).then(function (resp) {
+        if (!resp.ok) {
+          return resp.text().then(function (t) { throw new Error(_friendlyErr(resp.status, t, c.key ? '' : _gwHint())); });
+        }
+        return resp.text().then(function (t) {
+          var m = _parseMessage(t);
+          if (m && m.tool_calls && m.tool_calls.length) { opts.onToolCalls && opts.onToolCalls(m); return; }
+          var full = (m && m.content) || '';
+          opts.onDelta && opts.onDelta(full, full);
+          opts.onDone && opts.onDone(full);
+        });
+      }).catch(function (e) {
+        if (e && e.name === 'AbortError') { opts.onAbort && opts.onAbort(); return; }
+        opts.onError && opts.onError(_wrapNetErr(e));
+      });
+      return;
+    }
     // 联网检索：有服务端开关的服务商默认打开（能用就用，不做开关——用户拍板）。
     // 通义兼容口用 enable_search；智谱用 web_search 工具。其它家没有这种"一个参数就联网"的
     // 服务端开关（Kimi 的要多轮工具调用），乱塞参数会被严格接口拒收，所以不加。
     if (c.providerId === 'qwen') body.enable_search = true;
     else if (c.providerId === 'glm') body.tools = [{ type: 'web_search', web_search: { enable: true } }];
 
-    fetch(requestUrl(c.base), {
+    fetch(requestUrl(sa.url), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + c.key },
+      headers: _headers(c.key, sa.auth),
       body: JSON.stringify(body),
       signal: opts.signal,
     }).then(function (resp) {
       if (!resp.ok) {
         return resp.text().then(function (t) {
-          var msg = _friendlyErr(resp.status, t);
+          var msg = _friendlyErr(resp.status, t, c.key ? '' : _gwHint());
           throw new Error(msg);
         });
       }
@@ -460,9 +625,23 @@
   function _readStream(reader, opts) {
     var dec = new TextDecoder();
     var buf = '', full = '', think = '';
+    var tcs = null; // 流式工具调用累积：delta.tool_calls 按 index 合并（agent 循环用）
+    // 流结束：有完整工具调用就走 onToolCalls（agent.js 接手执行），否则当普通回答收尾
+    function _end() {
+      if (tcs && tcs.length) {
+        var calls = [];
+        for (var i = 0; i < tcs.length; i++) {
+          var t = tcs[i];
+          calls.push({ id: t.id, type: 'function', function: { name: t.name, arguments: t.args } });
+        }
+        opts.onToolCalls && opts.onToolCalls({ role: 'assistant', content: full || '', tool_calls: calls });
+        return;
+      }
+      opts.onDone && opts.onDone(full);
+    }
     function pump() {
       return reader.read().then(function (r) {
-        if (r.done) { opts.onDone && opts.onDone(full); return; }
+        if (r.done) { _end(); return; }
         buf += dec.decode(r.value, { stream: true });
         var lines = buf.split('\n');
         buf = lines.pop();
@@ -470,15 +649,31 @@
           var line = lines[i].trim();
           if (!line || line.indexOf('data:') !== 0) continue;
           var data = line.slice(5).trim();
-          if (data === '[DONE]') { opts.onDone && opts.onDone(full); return; }
+          if (data === '[DONE]') { _end(); return; }
           try {
             var j = JSON.parse(data);
-            var d = j.choices && j.choices[0] && j.choices[0].delta;
+            var ch = (j.choices && j.choices[0]) || {};
+            var d = ch.delta || {};
             var piece = d && (d.content || '');
             // 思考型模型（deepseek-reasoner 等）的推理流：单独回调，界面可实时展示「思考过程」
             var rz = d && (d.reasoning_content || d.reasoning || '');
             if (rz) { think += rz; opts.onThink && opts.onThink(rz, think); }
             if (piece) { full += piece; opts.onDelta && opts.onDelta(piece, full); }
+            // 工具调用增量：同一调用会分多片到达（id/name 首片、arguments 逐段拼接）
+            var tcsArr = d && d.tool_calls;
+            if (tcsArr && tcsArr.length) {
+              if (!tcs) tcs = [];
+              for (var ti = 0; ti < tcsArr.length; ti++) {
+                var tc = tcsArr[ti];
+                var idx = (tc.index != null) ? tc.index : tcs.length;
+                if (!tcs[idx]) tcs[idx] = { id: '', name: '', args: '' };
+                if (tc.id) tcs[idx].id = tc.id;
+                if (tc.function) {
+                  if (tc.function.name) tcs[idx].name += tc.function.name;
+                  if (tc.function.arguments) tcs[idx].args += tc.function.arguments;
+                }
+              }
+            }
           } catch (_) {}
         }
         return pump();
@@ -487,14 +682,26 @@
     return pump();
   }
 
+  /** 非流式响应解析出完整 message（含 tool_calls）；解析失败返回 null */
+  function _parseMessage(t) {
+    try {
+      var j = JSON.parse(t);
+      return (j.choices && j.choices[0] && j.choices[0].message) || null;
+    } catch (_) { return null; }
+  }
+
   function _parseNonStream(t) {
     try { var j = JSON.parse(t); return (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || ''; }
     catch (_) { return ''; }
   }
-  function _friendlyErr(status, t) {
+  function _friendlyErr(status, t, hint) {
     var detail = '';
     try { var j = JSON.parse(t); detail = (j.error && (j.error.message || j.error.code)) || j.message || ''; } catch (_) { detail = (t || '').slice(0, 160); }
-    if (status === 401 || status === 403) return 'API key 无效或没权限（' + status + '）：' + detail;
+    if (status === 401 || status === 403) {
+      var msg = 'API key 无效或没权限（' + status + '）：' + detail;
+      if (hint) msg += '。' + hint;
+      return msg;
+    }
     if (status === 402) return '余额不足或未开通（402）：' + detail;
     if (status === 404) return '接口地址或模型名不对（404）：' + detail;
     if (status === 429) return '请求太频繁 / 额度用尽（429）：' + detail;
@@ -536,9 +743,12 @@
     getKey: getKey, getKeyFor: getKeyFor, setKey: setKey,
     syncKeyUp: syncKeyUp, trySyncKeyDown: trySyncKeyDown,
     setProvider: setProvider, setModel: setModel, setBase: setBase,
+    modelOptions: modelOptions, refreshModels: refreshModels,
+    balanceSupported: balanceSupported, fetchBalance: fetchBalance,
     setTemp: function (t) { ss(SK.temp, String(t)); },
     setSysPrompt: function (s) { ss(SK.sysPrompt, (s || '').trim()); },
     chat: chat,
+    proxyPrefix: proxyPrefix, // MCP 客户端（mcp.js）复用同一套跨域代理约定
     getSelectionText: getSelectionText, insertToEditor: insertToEditor,
     getNoteContext: getNoteContext,
     showThink: showThink, setShowThink: setShowThink,
