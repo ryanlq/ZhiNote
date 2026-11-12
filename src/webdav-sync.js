@@ -4292,7 +4292,7 @@
       'activeWorkspace', 'lastOpenedId', 'startupNoteId', 'recent', 'recentEmojis', 'imagesDir',
       'webdavUrl', 'webdavUser', 'webdavPass', 'webdavProvider', 'webdavEncryptNotes', 'webdavProxy', 'webdavRealtime', 'webdavCryptoPass', 'pinned',
       'urlOpenInBrowser', 'urlOpenBrowser', 'unsyncedParkedIds'];
-    const LOCAL_PREFIX = ['webdav_', '_'];
+    const LOCAL_PREFIX = ['webdav_', 'git_', '_'];
     const shared = {};
     for (const k in settings) {
       if (LOCAL_ONLY.includes(k)) continue;

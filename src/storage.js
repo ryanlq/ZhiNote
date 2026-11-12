@@ -2729,7 +2729,7 @@ const storage = (() => {
     return out;
   }
 
-  function _webdavApplyNote(id, noteData) {
+  function _webdavApplyNote(id, noteData, opts) {
     if (!_data.notes) _data.notes = {};
     noteData = _sanitizeIncomingNoteBody(noteData);
     const prev = _data.notes[id];
@@ -2737,9 +2737,12 @@ const storage = (() => {
     //   仲裁)的值覆盖 → 杜绝「按篇通道 vs 总账」两条路互踩（反复重排/绿点狂转/两端不一致的总病根）。
     //   总账会在同一次 doGet 周期稍后(structLedger 在按篇之后应用)把它们设成权威值；离线则下次周期校正。
     //   仅本地不存在(新笔记/冲突副本/扫描恢复)时整篇采纳——无本地可保，随后总账校正归位。
+    //   opts.keepLedger === false（Git 后端）：不保留本地结构字段——Git 模式以 frontmatter 文件为权威，
+    //   且 noteData 不带 ydoc → 应用后笔记无账本，编辑器重建确定性创世（CRDT 不会复活旧内容）。
     if (prev && noteData) {
       const keep = {};
-      for (const k of _LEDGER_OWNED) if (k in prev) keep[k] = prev[k];
+      const owned = (opts && opts.keepLedger === false) ? [] : _LEDGER_OWNED;
+      for (const k of owned) if (k in prev) keep[k] = prev[k];
       _data.notes[id] = Object.assign({}, noteData, keep);
     } else {
       _data.notes[id] = noteData;
@@ -2945,6 +2948,38 @@ const storage = (() => {
     emit('change', { type: 'global-sync' });
   }
 
+  /** Git 后端专用：绕过总账权威语义直接应用全局变更（Git 模式以文件/frontmatter 为权威）。
+   *  g 可为 {} —— 仅做收尾（reconcile + save + emit global-sync），供逐笔记应用后统一刷新。
+   *  字段：workspaces[]、templates[]、wsDeleted{}、tplDeleted{}、noteTombstones{}、settings{}。 */
+  function _gitApplyGlobal(g) {
+    if (!_data) return;
+    g = g || {};
+    if (g.wsDeleted) _data.wsTombstones = { ...(_data.wsTombstones || {}), ...g.wsDeleted };
+    if (g.tplDeleted) _data.tplTombstones = { ...(_data.tplTombstones || {}), ...g.tplDeleted };
+    if (g.noteTombstones) _data.noteTombstones = { ...(_data.noteTombstones || {}), ...g.noteTombstones };
+    if (Array.isArray(g.workspaces)) {
+      const tomb = _data.wsTombstones || {};
+      let merged = (g.workspaces || []).filter(w => w && w.id && !tomb[w.id]);
+      if (!merged.length) merged = [{ id: 'ws-default', name: '默认笔记本', icon: '📒' }];
+      _data.workspaces = merged;
+    }
+    if (Array.isArray(g.templates)) {
+      const tt = _data.tplTombstones || {};
+      _data.templates = (g.templates || []).filter(t => t && t.id && !tt[t.id]);
+    }
+    if (g.settings) {
+      const rs = { ...g.settings };
+      const localPrefs = {};
+      for (const k of LOCAL_ONLY_SETTINGS) if (_data.settings && _data.settings[k] !== undefined) localPrefs[k] = _data.settings[k];
+      for (const k in _data.settings || {}) if (LOCAL_ONLY_PREFIX.some(p => k.startsWith(p))) localPrefs[k] = _data.settings[k];
+      _data.settings = { ...(_data.settings || {}), ...rs };
+      Object.assign(_data.settings, localPrefs);
+    }
+    reconcileStructure({ skipDirty: true });
+    save({ immediate: true });
+    emit('change', { type: 'global-sync' });
+  }
+
   /**
    * 仅并入远端「笔记本 / 模板」（含墓碑过滤），不动 rootOrder / settings。
    * 关键：即使本地 globalDirty（整体全局应用被跳过），也要先并入笔记本，
@@ -3006,6 +3041,14 @@ const storage = (() => {
           if (config.webdavPass) setSetting(pk + 'pass', config.webdavPass);
         }
       }
+      if (method === 'git') {
+        if (config.gitUrl) setSetting('gitUrl', config.gitUrl);
+        if (config.gitUser) setSetting('gitUser', config.gitUser);
+        if (config.gitPass) setSetting('gitPass', config.gitPass);
+        if (config.gitBranch) setSetting('gitBranch', config.gitBranch);
+        if (config.gitAuthorName) setSetting('gitAuthorName', config.gitAuthorName);
+        if (config.gitAuthorEmail) setSetting('gitAuthorEmail', config.gitAuthorEmail);
+      }
       setSetting('syncMethod', method);
       save({ immediate: true });
 
@@ -3014,6 +3057,10 @@ const storage = (() => {
       if (method === 'webdav' && window.webdavSync) {
         await window.webdavSync.loadConfig();
         window.webdavSync.startAutoSync();
+      }
+      if (method === 'git' && window.gitSync) {
+        await window.gitSync.loadConfig();
+        window.gitSync.startAutoSync();
       }
     } finally {
       _switchingMethod = false;
@@ -3040,8 +3087,8 @@ const storage = (() => {
     'urlOpenBrowser',   // 打开网址：app / webview / default / 浏览器 exe；本机、不上云。空则电脑端默认 webview
     'unsyncedParkedIds', // 久闲对云后放进回收站、尚未上云的本机独有篇
   ];
-  // 'webdav_' 前缀=同步配置；'_' 前缀=内部迁移标记，都只留本机
-  const LOCAL_ONLY_PREFIX = ['webdav_', '_'];
+  // 'webdav_' 前缀=同步配置；'git_' 前缀=Git 同步配置；'_' 前缀=内部迁移标记，都只留本机
+  const LOCAL_ONLY_PREFIX = ['webdav_', 'git_', '_'];
 
   function markDirty(reason) {
     const method = getSetting('syncMethod') || 'none';
@@ -3055,6 +3102,9 @@ const storage = (() => {
       } catch (_) {}
       window.webdavSync.schedulePut(reason || 'markDirty');
     }
+    if (method === 'git' && window.gitSync) {
+      window.gitSync.schedulePut(reason || 'markDirty');
+    }
   }
 
   async function flushBeforeHide() {
@@ -3063,6 +3113,9 @@ const storage = (() => {
     if (method === 'webdav' && window.webdavSync) {
       window.webdavSync.flushPutOnHide();
     }
+    if (method === 'git' && window.gitSync) {
+      window.gitSync.flushPutOnHide();
+    }
   }
 
   async function startAutoSync() {
@@ -3070,6 +3123,9 @@ const storage = (() => {
     if (method === 'none') return;
     if (method === 'webdav' && window.webdavSync) {
       window.webdavSync.startAutoSync();
+    }
+    if (method === 'git' && window.gitSync) {
+      window.gitSync.startAutoSync();
     }
   }
 
@@ -3102,6 +3158,7 @@ const storage = (() => {
     isIndexDirty, markIndexDirty, clearIndexDirty, getIndexPendingIds,
     getDataFormatVersion, migrateNotesToDoc,
     switchSyncMethod, reconcileStructure,
+    _gitApplyGlobal,
     _webdavApplyNote, _webdavRemoveNote, _webdavApplyGlobal, _webdavMergeWorkspaces, _webdavStoreImage, _emitCloudSync, _realtimeApply, _realtimeMaterializeNote,
     // 方案2 结构底稿（影子阶段，仅供验证/调试）
     _buildStructSnapshot, _structLedger: () => _data && _data.structLedger, _maintainStructLedgerNow: _maintainStructLedger,

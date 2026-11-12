@@ -3,3 +3,4 @@ Thumbs.db
 node_modules/
 发布版本/
 .wrangler/
+.alma-snapshots

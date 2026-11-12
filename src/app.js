@@ -176,6 +176,7 @@ async function bootstrap() {
     const _dot = document.getElementById('cloud-sync-dot');
     if (_dot) _dot.style.display = 'none';
   }
+  try { _updateHistoryBtn(); } catch (_) {}
   // 应用锁：在页面可见前先挂上锁屏，避免冷启动闪出内容
   try { window.appLock && window.appLock.init(); } catch (_) {}
   // 小枝 AI 助手形象
@@ -305,6 +306,10 @@ async function bootstrap() {
     toast('检测到正文与同步账本不一致，已记录日志（内容不受影响）', 'warning', { duration: 8000 });
   });
   storage.on('cloud-sync', (payload) => {
+    // Git 后端事件归一：git-sync-start/ok/fail/error → webdav-sync-* 同语义（绿点/保护条/toast 全复用）
+    if (payload && typeof payload.type === 'string' && payload.type.indexOf('git-sync-') === 0) {
+      payload.type = 'webdav-sync-' + payload.type.slice(9);
+    }
     if (payload.type === 'webdav-sync-start') {
       // 同步前先把编辑器里未落盘的正文 flush 到 storage，
       // 否则远端较新时 reloadCurrent 会覆盖掉内存里的未保存修改
@@ -1171,6 +1176,9 @@ function wireEvents() {
 
   document.getElementById('btn-outline-toggle').addEventListener('click', toggleOutline);
   document.getElementById('btn-cloze').addEventListener('click', toggleClozeMode);
+  // 版本历史按钮（Git 同步）
+  const btnHistory = document.getElementById('btn-history');
+  if (btnHistory) btnHistory.addEventListener('click', openNoteHistory);
 
   // 顶栏云同步按钮：左键智能同步，右键打开菜单
   const btnCloud = document.getElementById('btn-cloud-sync');
@@ -4505,7 +4513,8 @@ function _refreshSyncDot() {
   const el = document.getElementById('cloud-sync-dot');
   if (el && el.classList.contains('error')) return;
   const heavy = !!(window.webdavSync && window.webdavSync.isUiHeavy && window.webdavSync.isUiHeavy());
-  const busy = !!(window.webdavSync && window.webdavSync.isUiSyncing && window.webdavSync.isUiSyncing());
+  const busy = !!(window.webdavSync && window.webdavSync.isUiSyncing && window.webdavSync.isUiSyncing())
+    || !!(window.gitSync && window.gitSync.isUiSyncing && window.gitSync.isUiSyncing());
   if (heavy) { _setCloudSyncDot('syncing', 'heavy'); return; }
   if (busy) { _setCloudSyncDot('syncing'); return; }
   const noteDirty = !!(storage.getDirtyNoteIds && storage.getDirtyNoteIds().length);
@@ -4514,6 +4523,154 @@ function _refreshSyncDot() {
   _setCloudSyncDot('synced');
 }
 function _maybeBadgeLocal() { _refreshSyncDot(); }
+
+/** 版本历史按钮可见性：仅 Git 同步且后端就绪时显示。 */
+function _updateHistoryBtn() {
+  const btn = document.getElementById('btn-history');
+  if (!btn) return;
+  const on = (storage.getSetting('syncMethod') || 'none') === 'git' && !!window.gitSync;
+  btn.classList.toggle('hidden', !on);
+}
+
+/** 版本历史弹窗（Git 同步）：左侧版本列表，右侧 Markdown 预览，可还原。 */
+async function openNoteHistory() {
+  const id = editor.currentId?.();
+  if (!id) { toast('请先打开一篇笔记', 'warning'); return; }
+  const gitSync = window.gitSync;
+  if (!gitSync || typeof gitSync.listNoteHistory !== 'function') {
+    toast('当前未启用 Git 同步', 'warning'); return;
+  }
+
+  // 弹窗内容：左侧列表 + 右侧预览
+  const wrap = document.createElement('div');
+  wrap.className = 'gh-wrap';
+  const listEl = document.createElement('div');
+  listEl.className = 'gh-list';
+  const preview = document.createElement('div');
+  preview.className = 'gh-preview';
+
+  const metaEl = document.createElement('div');
+  metaEl.className = 'gh-preview-meta';
+  const restoreBtn = document.createElement('button');
+  restoreBtn.className = 'secondary-btn';
+  restoreBtn.disabled = true;
+  restoreBtn.textContent = '还原到此版本';
+  const bar = document.createElement('div');
+  bar.className = 'gh-preview-bar';
+  bar.appendChild(metaEl);
+  bar.appendChild(restoreBtn);
+  const bodyEl = document.createElement('div');
+  bodyEl.className = 'gh-preview-body';
+  bodyEl.id = 'gh-preview-body';
+  preview.appendChild(bar);
+  preview.appendChild(bodyEl);
+  wrap.appendChild(listEl);
+  wrap.appendChild(preview);
+
+  let curOid = null;
+
+  function pad(n) { return String(n).padStart(2, '0'); }
+  function fmtTime(ms) {
+    const d = new Date(ms || Date.now());
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+  function setState(host, text) {
+    host.innerHTML = '';
+    const st = document.createElement('div');
+    st.className = 'gh-state';
+    st.textContent = text;
+    host.appendChild(st);
+  }
+
+  let _loadSeq = 0;
+
+  async function loadVersion(c) {
+    const _seq = ++_loadSeq;
+    curOid = c.oid;
+    metaEl.textContent = '版本 ' + String(c.oid || '').slice(0, 8) + ' · ' + fmtTime(c.date);
+    restoreBtn.disabled = false;
+    setState(bodyEl, '正在读取…');
+    try {
+      const v = await gitSync.readNoteVersion(id, c.oid);
+      if (_seq !== _loadSeq) return; // 用户已切换到其他版本，丢弃过期读取
+      const html = window.editor.renderMdPreviewHtml(v.body || '');
+      // 预览 CSS 镜像自 #editor .ProseMirror，故必须包一层 .ProseMirror 节点
+      bodyEl.innerHTML = '<div class="ProseMirror">' + html + '</div>';
+    } catch (e) {
+      setState(bodyEl, '读取失败：' + _zhSyncError(e?.message || e));
+    }
+  }
+
+  restoreBtn.addEventListener('click', async () => {
+    if (!curOid) return;
+    restoreBtn.disabled = true;
+    try {
+      const ok = await uiConfirm({
+        title: '还原版本',
+        message: '将用此版本覆盖当前笔记（正文与标题等字段），还原后的改动会在下次同步成为一次新提交。\n\n确定继续吗？',
+        okText: '还原',
+        okClass: 'primary-btn',
+      });
+      if (!ok) { restoreBtn.disabled = false; return; }
+      await gitSync.restoreNoteVersion(id, curOid);
+      toast('已还原到所选版本', 'success');
+      editor.reloadCurrent();
+      closeModal();
+    } catch (e) {
+      restoreBtn.disabled = false;
+      toast('还原失败：' + _zhSyncError(e?.message || e), 'error');
+    }
+  });
+
+  openModal({
+    title: '版本历史',
+    body: wrap,
+    dialogClass: 'git-history-modal',
+    onClose: () => { restoreBtn.disabled = true; },
+  });
+
+  // 拉取该笔记的版本列表
+  setState(listEl, '正在加载版本列表…');
+  try {
+    const commits = await gitSync.listNoteHistory(id);
+    listEl.innerHTML = '';
+    if (!commits || !commits.length) {
+      setState(listEl, '该笔记还没有同步过，暂无版本历史');
+      metaEl.textContent = '';
+      return;
+    }
+    commits.forEach((c) => {
+      const item = document.createElement('button');
+      item.className = 'gh-list-item';
+      const date = document.createElement('span');
+      date.className = 'gh-list-date';
+      date.textContent = fmtTime(c.date);
+      const msg = document.createElement('span');
+      msg.className = 'gh-list-msg';
+      msg.textContent = (c.message || '').trim() || '（无提交信息）';
+      const oid = document.createElement('span');
+      oid.className = 'gh-list-oid';
+      oid.textContent = String(c.oid || '').slice(0, 8);
+      item.appendChild(date);
+      item.appendChild(msg);
+      item.appendChild(oid);
+      item.addEventListener('click', () => {
+        listEl.querySelectorAll('.gh-list-item').forEach(x => x.classList.remove('active'));
+        item.classList.add('active');
+        loadVersion(c);
+      });
+      listEl.appendChild(item);
+    });
+    // 默认选中最新一条
+    const firstItem = listEl.querySelector('.gh-list-item');
+    if (firstItem) firstItem.classList.add('active');
+    loadVersion(commits[0]);
+  } catch (e) {
+    setState(listEl, '加载失败：' + _zhSyncError(e?.message || e));
+  }
+}
+window.openNoteHistory = openNoteHistory;
+
 
 /** 云同步徽标：显示在 btn-cloud-sync 右上角 */
 let _lastSyncTime = null;
@@ -4579,6 +4736,24 @@ async function smartCloudSync() {
     toast('当前已关闭云同步', 'info');
     return;
   }
+  if (method === 'git') {
+    if (!window.gitSync) { toast('Git 同步未就绪', 'warning'); return; }
+    if (_cloudSyncBusy) { toast('正在同步…', 'info'); return; }
+    const btn = document.getElementById('btn-cloud-sync');
+    if (btn) btn.classList.add('active');
+    _cloudSyncBusy = true;
+    try {
+      editor.flushSave();
+      await window.gitSync.manualSync();
+      try { _refreshSyncDot(); } catch (_) {}
+    } catch (e) {
+      toast('同步失败：' + _zhSyncError(e?.message || e), 'error');
+    } finally {
+      _cloudSyncBusy = false;
+      if (btn) setTimeout(() => btn.classList.remove('active'), 600);
+    }
+    return;
+  }
   if (method !== 'webdav' || !window.webdavSync) {
     toast('云同步未就绪', 'warning');
     return;
@@ -4617,7 +4792,19 @@ function openCloudSyncMenu(anchor) {
         <span>${badgeHidden ? '显示同步徽标' : '隐藏同步徽标'}</span>
       </div>`;
 
-  if (method === 'webdav') {
+  if (method === 'git') {
+    popup.innerHTML = `
+      <div class="context-menu-item" data-act="sync">
+        <span style="width:14px;color:var(--accent);">⟳</span>
+        <span>立即同步</span>
+      </div>
+      <div class="context-menu-divider"></div>
+      <div class="context-menu-item" data-act="settings">
+        <span style="width:14px;color:var(--text-tertiary);">⚙</span>
+        <span>打开云同步设置</span>
+      </div>${badgeToggleHtml}
+    `;
+  } else if (method === 'webdav') {
     let rtLine = '';
     try {
       const st = window.realtime && window.realtime.status && window.realtime.status();
@@ -4728,11 +4915,12 @@ function _webAppUrl() {
  * 给人看的号 = window.__MD_VER__（打包注入）。网页端 whats-new.json 的 id/ver 打包时写成同一串。
  * 版本已读、勿扰、跟这台走的勾删只写本机；跟笔记走的勾删进 settings.bellMsgAcks 随账号。 */
 const WHATS_NEW = {
-  id: window.__MD_VER__ || '20260821t1',
-  date: '2026-08-21',
+  id: window.__MD_VER__ || '20261112t1',
+  date: '2026-11-12',
   items: [
-    { title: '折叠待办', text: '修复折叠列表里的待办任务显示问题（折叠标题不支持放任务框）。' },
-    { title: '闲机回收', text: '很久没开的设备对完云后，独有的旧笔记进回收站，避免把旧稿传到云上。' },
+    { title: 'Git 仓库同步', text: '新增自建 Git 仓库同步后端，笔记以 Markdown 明文存入仓库，完整保留每次提交的版本历史。' },
+    { title: '笔记版本历史', text: 'Git 同步下可查看单篇笔记的历次提交、预览任意时点内容，并一键还原。' },
+    { title: '自动同步与冲突留底', text: '切换仓库后自动按周期拉取、合并并推送；遇到冲突时保留双方版本到 conflicts/ 目录。' },
   ],
   history: [
     {
@@ -5884,6 +6072,9 @@ async function requestHideWindow() {
     if (method === 'webdav') {
       storage.save({ immediate: true });
       if (window.webdavSync) window.webdavSync.flushPutOnHide();
+    } else if (method === 'git') {
+      storage.save({ immediate: true });
+      if (window.gitSync) window.gitSync.flushPutOnHide();
     } else {
       storage.save({ immediate: true });
     }
@@ -7170,6 +7361,7 @@ function openSettingsModal(initialTab) {
       <option value="koofr" ${curSyncMethod==='webdav'&&curProvider==='koofr'?'selected':''} title="免费 10GB · 无流量限制 · 欧洲服务器">Koofr (10GB)</option>
       <option value="infinicloud" ${curSyncMethod==='webdav'&&curProvider==='infinicloud'?'selected':''} title="免费 20GB · 无流量限制 · 日本服务器 · 注册可能需排队">InfiniCLOUD (20GB·可能排队)</option>
       <option value="custom" ${curSyncMethod==='webdav'&&curProvider==='custom'?'selected':''} title="自行搭建或其他支持 WebDAV 的服务">自定义 WebDAV</option>
+      <option value="git" ${curSyncMethod==='git'?'selected':''} title="自建 Git 仓库（明文存储）· 完整版本历史 · 支持任意时点回滚">Git 仓库（自建 · 版本历史）</option>
       <option value="none" ${curSyncMethod==='none'?'selected':''} title="关闭所有云端同步，仅本地保存">关闭同步</option>
     </select>
     <div id="sync-actions-wrap" class="${curSyncMethod==='none'?'settings-tab-hidden':''}">
@@ -7269,6 +7461,35 @@ function openSettingsModal(initialTab) {
       </div>
     </details>`;})()}
     <div style="font-size:12px;color:var(--text-tertiary);margin-top:14px;line-height:1.6;">升到新同步时会把旧总目录备份到网盘 <code>ZhiNote-bak</code>。确认两端都换新包并对齐后，可自己删这份备份；程序不会自动删。</div>
+    </div>
+
+    <div id="sync-panel-git" class="sync-panel ${curSyncMethod==='git'?'':'settings-tab-hidden'}">
+    <label>仓库地址</label>
+    <input type="text" id="set-git-url" placeholder="https://你的服务器/git/zhinote.git" value="${escapeHtml(storage.getSetting('gitUrl')||'')}" style="width:100%;">
+    <label>用户名</label>
+    <input type="text" id="set-git-user" placeholder="Git HTTP 认证用户名（无鉴权可空）" autocomplete="off" value="${escapeHtml(storage.getSetting('gitUser')||'')}" style="width:100%;">
+    <label>密码</label>
+    <div class="pass-input-wrap" style="position:relative;">
+      <input type="password" id="set-git-pass" placeholder="Git HTTP 认证密码（只存本机）" autocomplete="new-password" style="width:100%;padding-right:36px;">
+      <button type="button" id="set-git-pass-eye" class="pass-eye-btn" title="显示/隐藏密码">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+      </button>
+    </div>
+    <label style="margin-top:14px;">分支</label>
+    <input type="text" id="set-git-branch" placeholder="main" value="${escapeHtml(storage.getSetting('gitBranch')||'main')}" style="width:100%;">
+    <label style="margin-top:14px;">提交署名（显示在版本历史里）</label>
+    <input type="text" id="set-git-author-name" placeholder="名字，如 ZhiNote" value="${escapeHtml(storage.getSetting('gitAuthorName')||'')}" style="width:100%;">
+    <input type="text" id="set-git-author-email" placeholder="邮箱，如 me@example.com" value="${escapeHtml(storage.getSetting('gitAuthorEmail')||'')}" style="width:100%;margin-top:8px;">
+    <div style="font-size:12px;color:var(--text-tertiary);margin-top:14px;line-height:1.6;">
+      · Git 模式<b>明文存储</b>：笔记以标准 Markdown 存到你自己的 Git 服务器（不做加密），请确保服务器只有你能访问；<br>
+      · 每次同步 = 一次提交，<b>完整版本历史</b>可在任意笔记上查看并回滚；<br>
+      · 需要服务器支持 Git HTTP 智能协议（如 Gitea / nginx+git-http-backend / Caddy+fcgiwrap）并放行跨域；<br>
+      · 密码只保存在本机，不上云不同步——换设备需重新填写。
+    </div>
+    <div class="sync-actions-row" style="margin-top:14px;">
+      <button type="button" id="set-git-test" class="sync-act-btn" title="测试仓库连接与认证">测试连接</button>
+    </div>
+    <div id="git-sync-status" class="sync-inline-msg"></div>
     </div>
     </div>
     <div id="settings-tab-backup" class="${lastTab!=='backup'?'settings-tab-hidden':''}">
@@ -7603,6 +7824,12 @@ function openSettingsModal(initialTab) {
           } catch (_) {}
         }
         const syncChanged = (() => {
+          if (selectedMethod === 'git') {
+            if (curSyncMethod !== 'git') return true;
+            const g = _readGitFields();
+            return g.url !== (storage.getSetting('gitUrl') || '') || g.user !== (storage.getSetting('gitUser') || '')
+              || g.pass !== (storage.getSetting('gitPass') || '') || g.branch !== (storage.getSetting('gitBranch') || 'main');
+          }
           if (selectedMethod === 'none') return curSyncMethod !== 'none';
           if (curSyncMethod !== 'webdav') return true;
           if (selectedMethod !== curProvider) return true;
@@ -7674,6 +7901,30 @@ function openSettingsModal(initialTab) {
               return;
             }
           }
+          } else if (selectedMethod === 'git') {
+          const g = _readGitFields();
+          if (!g.url) { toast('请填写 Git 仓库地址', 'warning'); return; }
+          try {
+            // 先落配置再切后端；测试连接失败时配置已保存（backend 未启动），提示排查
+            await storage.switchSyncMethod('git', {
+              gitUrl: g.url, gitUser: g.user, gitPass: g.pass, gitBranch: g.branch,
+              gitAuthorName: g.an, gitAuthorEmail: g.ae, autoStart: false,
+            });
+            _setCloudSyncDot('syncing', 'heavy');
+            await window.gitSync.loadConfig();
+            try {
+              await window.gitSync.testConnection({ url: g.url, user: g.user, pass: g.pass, branch: g.branch });
+              await window.gitSync.startAutoSync();
+              toast('已切换到 Git 仓库同步（明文存储 · 完整版本历史）', 'success');
+            } catch (te) {
+              toast('配置已保存，但连接失败：' + _zhSyncError(te?.message || te), 'warning', { duration: 10000 });
+            }
+            try { window.realtime?.applyConfig(); } catch (_) {}
+            try { _updateHistoryBtn(); } catch (_) {}
+          } catch (e) {
+            toast('Git 同步切换失败：' + _zhSyncError(e?.message || e), 'error');
+            return;
+          }
         } else {
           if (!newUrl || !newUser || !newPass) {
             toast('请填写所有字段', 'warning');
@@ -7741,6 +7992,7 @@ function openSettingsModal(initialTab) {
           }
         }
         } // end if (syncChanged)
+        try { _updateHistoryBtn(); } catch (_) {}
 
         await storage.save({ immediate: true });
         closeModal();
@@ -7851,7 +8103,7 @@ function openSettingsModal(initialTab) {
     // 状态只属于「当前已保存、正在用的那家服务商」：
     //   下拉切到别家 / 关闭同步 / 本机本来就没开同步 → 框内状态藏起，避免误把旧账号的「已同步」贴到新选项上。
     const savedMethod = storage.getSetting('syncMethod') || 'none';
-    const savedProvider = savedMethod === 'webdav' ? (storage.getSetting('webdavProvider') || 'none') : 'none';
+    const savedProvider = savedMethod === 'webdav' ? (storage.getSetting('webdavProvider') || 'none') : (savedMethod === 'git' ? 'git' : 'none');
     const sel = syncMethodSelect.value;
     const live = sel !== 'none' && sel === savedProvider;
     el.hidden = !live;
@@ -7953,11 +8205,14 @@ function openSettingsModal(initialTab) {
   function _updateSyncPanels() {
     const v = syncMethodSelect.value;
     const wasWebdav = _lastSyncSelect !== 'none';
-    if (v === 'none') {
+    const panelGit = body.querySelector('#sync-panel-git');
+    if (v === 'none' || v === 'git') {
       if (wasWebdav) _stashWebdavDraft();
       panelWebdav.classList.add('settings-tab-hidden');
+      if (panelGit) panelGit.classList.toggle('settings-tab-hidden', v !== 'git');
       if (syncActionsWrap) syncActionsWrap.classList.add('settings-tab-hidden');
     } else {
+      if (panelGit) panelGit.classList.add('settings-tab-hidden');
       panelWebdav.classList.remove('settings-tab-hidden');
       if (syncActionsWrap) syncActionsWrap.classList.remove('settings-tab-hidden');
       _switchWebdavProvider(v).then(() => {
@@ -7981,9 +8236,19 @@ function openSettingsModal(initialTab) {
   // 「立即同步 / 管理云端笔记」作用于已保存的配置，未保存时操作会指向旧服务商，需先拦截避免误解。
   function _hasUnsavedSyncChange() {
     const savedMethod = storage.getSetting('syncMethod') || 'none';
-    const savedProvider = savedMethod === 'webdav' ? (storage.getSetting('webdavProvider') || 'none') : 'none';
+    const savedProvider = savedMethod === 'webdav' ? (storage.getSetting('webdavProvider') || 'none') : (savedMethod === 'git' ? 'git' : 'none');
     const sel = syncMethodSelect.value;
     if (sel !== savedProvider) return true;
+    if (sel === 'git') {
+      // Git 模式：任一字段与已保存值不同即视为未保存
+      const gUrl = body.querySelector('#set-git-url')?.value?.trim() || '';
+      const gUser = body.querySelector('#set-git-user')?.value?.trim() || '';
+      const gBranch = body.querySelector('#set-git-branch')?.value?.trim() || 'main';
+      if (gUrl !== (storage.getSetting('gitUrl') || '')) return true;
+      if (gUser !== (storage.getSetting('gitUser') || '')) return true;
+      if (gBranch !== (storage.getSetting('gitBranch') || 'main')) return true;
+      return false;
+    }
     if (sel !== 'none') {
       const pk = 'webdav_' + sel + '_';
       if (urlInput.value.trim() !== (storage.getSetting(pk + 'url') || '')) return true;
@@ -8006,6 +8271,37 @@ function openSettingsModal(initialTab) {
   };
   _bindEye('#set-webdav-pass-eye', '#set-webdav-pass');
   _bindEye('#set-webdav-crypto-eye', '#set-webdav-crypto-pass');
+  _bindEye('#set-git-pass-eye', '#set-git-pass');
+
+  // Git 面板字段读取
+  function _readGitFields() {
+    return {
+      url: (body.querySelector('#set-git-url')?.value || '').trim().replace(/\/+$/, ''),
+      user: (body.querySelector('#set-git-user')?.value || '').trim(),
+      pass: body.querySelector('#set-git-pass')?.value || '',
+      branch: (body.querySelector('#set-git-branch')?.value || 'main').trim() || 'main',
+      an: (body.querySelector('#set-git-author-name')?.value || '').trim(),
+      ae: (body.querySelector('#set-git-author-email')?.value || '').trim(),
+    };
+  }
+  // Git 测试连接（验地址/认证/服务器跨域配置）
+  const gitTestBtn = body.querySelector('#set-git-test');
+  if (gitTestBtn) gitTestBtn.addEventListener('click', async () => {
+    const g = _readGitFields();
+    const st = body.querySelector('#git-sync-status');
+    if (!g.url) { if (st) { st.textContent = '请先填写仓库地址'; st.className = 'sync-inline-msg err'; } return; }
+    gitTestBtn.disabled = true; const old = gitTestBtn.textContent; gitTestBtn.textContent = '测试中…';
+    if (st) { st.textContent = '正在连接…'; st.className = 'sync-inline-msg'; }
+    try {
+      const r = await window.gitSync.testConnection({ url: g.url, user: g.user, pass: g.pass, branch: g.branch });
+      if (st) {
+        st.textContent = '✓ 连接成功' + (r.branches.length ? '（分支：' + r.branches.join(', ') + '）' : '（空仓库，首次同步将全量导出）');
+        st.className = 'sync-inline-msg ok';
+      }
+    } catch (e) {
+      if (st) { st.textContent = '✗ ' + _zhSyncError(e?.message || e) + '（检查地址/认证/服务器跨域配置）'; st.className = 'sync-inline-msg err'; }
+    } finally { gitTestBtn.disabled = false; gitTestBtn.textContent = old; }
+  });
 
   // 读取代理 UI 的存储语义值：'' = 内置默认代理；'direct' = 直连；其余 = 自定义地址
   function _readProxySetting() {

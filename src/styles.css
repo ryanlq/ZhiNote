@@ -6627,3 +6627,1036 @@ body.theme-dark #editor .ProseMirror .zn-mention:hover {
   display: block; position: absolute; top: 3px; right: 3px; width: 6px; height: 6px;
   background: var(--accent); border-radius: 50%; border: 1.5px solid var(--bg);
 }
+
+/* ── 版本历史预览：把 #editor .ProseMirror 的 176 条内容样式镜像到弹窗预览区 ──
+   预览编辑器渲染在 #editor 内的离屏节点上，但注入弹窗后脱离 #editor 祖先，
+   因此这里复制一份同等规则（#gh-preview-body 与 #editor 同为 id，特异性一致）。
+   由脚本自动生成，勿手改；如需调整内容样式请改 #editor 区块后重新生成。 ── */
+
+#gh-preview-body .ProseMirror {
+
+  outline: none;
+  min-height: 100%;
+  padding-bottom: 40vh;
+  font-family: var(--font-content, inherit);
+  font-size: var(--editor-font-size, 15px);
+  font-weight: 450;
+  line-height: var(--editor-line-height, 1.5);
+  color: var(--text);
+  caret-color: var(--text);
+}
+
+#gh-preview-body .ProseMirror *:not(img) {
+
+  -webkit-user-drag: none;
+}
+
+#gh-preview-body .ProseMirror img {
+
+  cursor: grab;
+}
+
+/* 正文表情原子节点（znEmoji）：固定盒宽画 Twemoji；相邻留缝给插入符 */
+#gh-preview-body .ProseMirror .zn-emoji {
+
+  display: inline-block;
+  width: 1.25em;
+  height: 1.25em;
+  line-height: 1.25em;
+  vertical-align: -0.2em;
+  overflow: hidden;
+  background-repeat: no-repeat;
+  background-position: center center;
+  background-size: 1.15em 1.15em;
+  margin-inline-end: 2px;
+  cursor: text;
+  user-select: none;
+  -webkit-user-select: none;
+  color: transparent;
+  font-size: 1.15em;
+  text-align: center;
+}
+
+#gh-preview-body .ProseMirror .zn-emoji.is-empty {
+
+  background-color: rgba(128, 128, 128, 0.18);
+  border-radius: 3px;
+}
+
+/* Twemoji 没有时：占位，不露系统脸 */
+#gh-preview-body .ProseMirror .zn-emoji.is-native {
+
+  background-image: none !important;
+  background-color: rgba(128, 128, 128, 0.18);
+  color: transparent;
+}
+
+#gh-preview-body .ProseMirror img:active {
+
+  cursor: grabbing;
+}
+
+#gh-preview-body .ProseMirror > * + * {
+
+  margin-top: 0.2em;
+}
+
+/* Headings */
+#gh-preview-body .ProseMirror h1,
+#gh-preview-body .ProseMirror h2,
+#gh-preview-body .ProseMirror h3,
+#gh-preview-body .ProseMirror h4,
+#gh-preview-body .ProseMirror h5,
+#gh-preview-body .ProseMirror h6 {
+
+  font-weight: 600;
+  line-height: 1.3;
+  margin-top: 0.4em;
+  margin-bottom: 0.1em;
+}
+
+#gh-preview-body .ProseMirror > h1:first-child,
+#gh-preview-body .ProseMirror > h2:first-child,
+#gh-preview-body .ProseMirror > h3:first-child,
+#gh-preview-body .ProseMirror > h4:first-child,
+#gh-preview-body .ProseMirror > h5:first-child,
+#gh-preview-body .ProseMirror > h6:first-child {
+
+  margin-top: 0;
+}
+
+#gh-preview-body .ProseMirror h1 {
+ font-size: 1.8em;
+}
+
+#gh-preview-body .ProseMirror h2 {
+ font-size: 1.5em;
+}
+
+#gh-preview-body .ProseMirror h3 {
+ font-size: 1.3em;
+}
+
+#gh-preview-body .ProseMirror h4 {
+ font-size: 1.15em;
+}
+
+#gh-preview-body .ProseMirror h5 {
+ font-size: 1.05em;
+}
+
+#gh-preview-body .ProseMirror h6 {
+ font-size: 1em; color: var(--text-secondary);
+}
+
+/* Paragraph */
+#gh-preview-body .ProseMirror p {
+
+  margin: 0;
+}
+
+/* Underline — 下移并减细，避免遮住文字（尤其下划线 + 高亮叠加时） */
+#gh-preview-body .ProseMirror u {
+
+  text-decoration-line: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+  text-decoration-skip-ink: auto;
+}
+
+/* Blockquote */
+#gh-preview-body .ProseMirror blockquote {
+
+  border-left: 3px solid var(--accent, #4a9eff);
+  padding-left: 1em;
+  margin-left: 0;
+  color: var(--text-secondary);
+}
+
+/* 正文折叠块三角（仅编辑区）。侧栏笔记树用 .tree-chevron，勿共用。 */
+#gh-preview-body .ProseMirror .zn-fold {
+
+  position: relative;
+  margin: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+  min-width: 0;
+}
+
+/* 普通折叠列表：行高/边距跟旁边正文走；三角钉在第一行，不随换行居中 */
+#gh-preview-body .ProseMirror .zn-fold[data-level="0"] {
+
+  align-items: flex-start;
+}
+
+#gh-preview-body .ProseMirror .zn-fold-chevron {
+
+  flex: none;
+  width: 34px;
+  height: 34px;
+  margin: 0 2px 0 0;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  -webkit-app-region: no-drag;
+  transition: color 0.15s ease, background 0.15s ease, opacity 0.15s ease;
+}
+
+#gh-preview-body .ProseMirror .zn-fold[data-level="0"] > .zn-fold-chevron {
+
+  width: 1.15em;
+  height: 1.15em;
+  margin: 0.18em 6px 0 0;
+  border-radius: 4px;
+  overflow: visible;
+}
+
+#gh-preview-body .ProseMirror .zn-fold[data-level="0"] > .zn-fold-chevron .zn-fold-chevron-icon {
+
+  width: 18px;
+  height: 18px;
+}
+
+#gh-preview-body .ProseMirror .zn-fold.is-empty > .zn-fold-chevron {
+
+  color: var(--text-tertiary);
+  opacity: 0.5;
+}
+
+#gh-preview-body .ProseMirror .zn-fold-chevron:hover {
+
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--text);
+  opacity: 1;
+}
+
+body.theme-dark #gh-preview-body .ProseMirror .zn-fold-chevron:hover {
+
+  background: rgba(255, 255, 255, 0.06);
+}
+
+#gh-preview-body .ProseMirror .zn-fold-chevron-icon {
+
+  display: block;
+  width: 18px;
+  height: 18px;
+  transform: rotate(0deg);
+  transition: transform 0.16s cubic-bezier(0.23, 1, 0.32, 1);
+  transform-origin: 50% 50%;
+}
+
+#gh-preview-body .ProseMirror .zn-fold.is-open > .zn-fold-chevron .zn-fold-chevron-icon {
+
+  transform: rotate(90deg);
+}
+
+#gh-preview-body .ProseMirror .zn-fold-inner {
+
+  flex: 1;
+  min-width: 0;
+}
+
+#gh-preview-body .ProseMirror .zn-fold[data-level="1"] > .zn-fold-chevron,
+#gh-preview-body .ProseMirror .zn-fold[data-level="2"] > .zn-fold-chevron,
+#gh-preview-body .ProseMirror .zn-fold[data-level="3"] > .zn-fold-chevron {
+
+  width: 36px;
+  height: 36px;
+  margin-top: 0.15em;
+}
+
+#gh-preview-body .ProseMirror .zn-fold-summary {
+
+  min-height: 34px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  line-height: 1.55;
+  outline: none;
+}
+
+#gh-preview-body .ProseMirror .zn-fold[data-level="0"] > .zn-fold-inner > .zn-fold-summary {
+
+  min-height: 0;
+  padding: 0;
+  line-height: inherit;
+  border-radius: 4px;
+}
+
+#gh-preview-body .ProseMirror .zn-fold-summary:hover {
+
+  background: rgba(0, 0, 0, 0.035);
+}
+
+#gh-preview-body .ProseMirror .zn-fold-summary:empty::before {
+
+  content: '折叠标题';
+  color: var(--text-tertiary, #a89f8c);
+  pointer-events: none;
+}
+
+#gh-preview-body .ProseMirror .zn-fold[data-level="1"] > .zn-fold-inner > .zn-fold-summary {
+
+  font-size: 1.8em;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  min-height: 1.3em;
+  line-height: 1.3;
+}
+
+#gh-preview-body .ProseMirror .zn-fold[data-level="2"] > .zn-fold-inner > .zn-fold-summary {
+
+  font-size: 1.5em;
+  font-weight: 650;
+  min-height: 1.3em;
+  line-height: 1.35;
+}
+
+#gh-preview-body .ProseMirror .zn-fold[data-level="3"] > .zn-fold-inner > .zn-fold-summary {
+
+  font-size: 1.3em;
+  font-weight: 650;
+  min-height: 1.3em;
+  line-height: 1.4;
+}
+
+#gh-preview-body .ProseMirror .zn-fold-content {
+
+  padding: 0 0 0 2px;
+  margin-left: 0;
+}
+
+#gh-preview-body .ProseMirror .zn-fold:not(.is-open) > .zn-fold-inner > .zn-fold-content {
+
+  display: none;
+}
+
+/* Horizontal rule */
+#gh-preview-body .ProseMirror hr {
+
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 0.75em 0;
+}
+
+/* 列表项内的 hr 默认只占 li 内容宽；向左延伸抵消 ul/ol 缩进，与正文区同宽 */
+#gh-preview-body .ProseMirror li > hr {
+
+  margin-left: -1.5em;
+  width: calc(100% + 1.5em);
+  box-sizing: border-box;
+}
+
+#gh-preview-body .ProseMirror li li > hr {
+
+  margin-left: -3em;
+  width: calc(100% + 3em);
+}
+
+#gh-preview-body .ProseMirror li li li > hr {
+
+  margin-left: -4.5em;
+  width: calc(100% + 4.5em);
+}
+
+#gh-preview-body .ProseMirror ul[data-type="taskList"] li > hr {
+
+  margin-left: 0;
+  width: 100%;
+}
+
+/* Inline code */
+#gh-preview-body .ProseMirror code:not(pre code) {
+
+  background: var(--bg-tertiary, rgba(0,0,0,0.05));
+  border-radius: 3px;
+  padding: 0.15em 0.35em;
+  font-size: 0.9em;
+  font-family: var(--font-mono, 'JetBrains Mono', monospace);
+  color: var(--accent, #4a9eff);
+}
+
+body.theme-dark #gh-preview-body .ProseMirror code:not(pre code) {
+
+  background: rgba(255,255,255,0.08);
+}
+
+/* Code block */
+#gh-preview-body .ProseMirror pre {
+
+  background: transparent;
+  margin: 0;
+  padding: 12px 16px;
+  overflow-x: auto;
+  font-family: var(--font-mono, 'JetBrains Mono', monospace);
+  font-size: 0.875em;
+  line-height: 1.6;
+  border-radius: 0 0 8px 8px;
+}
+
+body.theme-dark #gh-preview-body .ProseMirror pre {
+
+  background: transparent;
+}
+
+/* 代码块语法高亮 token 配色（浅色主题） */
+#gh-preview-body .ProseMirror pre .hl-comment {
+ color: #6a9955; font-style: italic;
+}
+
+#gh-preview-body .ProseMirror pre .hl-string {
+ color: #c2410c;
+}
+
+#gh-preview-body .ProseMirror pre .hl-number {
+ color: #1d4ed8;
+}
+
+#gh-preview-body .ProseMirror pre .hl-keyword {
+ color: #9333ea; font-weight: 600;
+}
+
+#gh-preview-body .ProseMirror pre .hl-literal {
+ color: #0e7490; font-weight: 600;
+}
+
+/* 深色主题 token 配色 */
+body.theme-dark #gh-preview-body .ProseMirror pre .hl-comment {
+ color: #7da86a;
+}
+
+body.theme-dark #gh-preview-body .ProseMirror pre .hl-string {
+ color: #e0a878;
+}
+
+body.theme-dark #gh-preview-body .ProseMirror pre .hl-number {
+ color: #7fb3ff;
+}
+
+body.theme-dark #gh-preview-body .ProseMirror pre .hl-keyword {
+ color: #c792ea;
+}
+
+body.theme-dark #gh-preview-body .ProseMirror pre .hl-literal {
+ color: #4dd0c4;
+}
+
+/* Language badge */
+/* Folded state: show 3 lines preview + gradient */
+#gh-preview-body .ProseMirror .code-block-wrapper.code-block-folded pre {
+
+  max-height: calc(3 * 1.6em + 16px) !important;
+  overflow: hidden !important;
+  pointer-events: none;
+}
+
+#gh-preview-body .ProseMirror .code-block-wrapper.code-block-folded pre::after {
+
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2.2em;
+  background: linear-gradient(to bottom, transparent, var(--bg-tertiary, #f8f9fa));
+  border-radius: 0 0 8px 8px;
+  pointer-events: none;
+}
+
+body.theme-dark #gh-preview-body .ProseMirror .code-block-wrapper.code-block-folded pre::after {
+
+  background: linear-gradient(to bottom, transparent, rgba(30,30,30,1));
+}
+
+#gh-preview-body .ProseMirror img.img-locate-flash {
+
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  box-shadow: 0 0 0 4px rgba(35, 131, 226, 0.25);
+  transition: outline-color 0.3s, box-shadow 0.3s;
+}
+
+/* Table */
+/* 用户表格：排除日历网格（.cal-grid），否则这些 ID 特指度更高的规则会覆盖日历的
+   table-layout:fixed / width:100%，使 min-width:60px、width:auto 生效 → 长记事撑宽列、日历溢出。 */
+#gh-preview-body .ProseMirror table:not(.cal-grid) {
+
+  border-collapse: collapse;
+  width: auto;
+  margin: 0.4em 0;
+}
+
+#gh-preview-body .ProseMirror table:not(.cal-grid) th,
+#gh-preview-body .ProseMirror table:not(.cal-grid) td {
+
+  border: 1px solid var(--border, #e8e8e8);
+  padding: 5px 10px;
+  text-align: left;
+  min-width: 60px;
+  line-height: 1.5;
+}
+
+#gh-preview-body .ProseMirror table th {
+
+  background: var(--bg-tertiary, #f0f4f8);
+  font-weight: 600;
+  border: 1px solid var(--border-strong, #d0d0d0);
+}
+
+body.theme-dark #gh-preview-body .ProseMirror table th {
+
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+#gh-preview-body .ProseMirror table td, #gh-preview-body .ProseMirror table th {
+
+  -webkit-user-drag: none;
+  user-select: text;
+  position: relative;
+  min-height: 1.5em;
+}
+
+#gh-preview-body .ProseMirror table td.selectedCell,
+#gh-preview-body .ProseMirror table th.selectedCell {
+
+  background: rgba(120, 180, 255, 0.15);
+}
+
+body.theme-dark #gh-preview-body .ProseMirror table td.selectedCell,
+body.theme-dark #gh-preview-body .ProseMirror table th.selectedCell {
+
+  background: rgba(100, 160, 255, 0.2);
+}
+
+#gh-preview-body .ProseMirror table td *,
+#gh-preview-body .ProseMirror table th * {
+
+  -webkit-user-drag: none;
+}
+
+/* 表格单元格内的块级元素去掉外边距，避免单元格被撑高 */
+#gh-preview-body .ProseMirror table td > *,
+#gh-preview-body .ProseMirror table th > * {
+
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+}
+
+/* 单元格里的标题：保留原本字号（点击放大照样生效），
+ * 只把外边距清零、行高收紧，使文字到上下框线的距离与普通文字一致、不臃肿。 */
+#gh-preview-body .ProseMirror table td :is(h1,h2,h3,h4,h5,h6),
+#gh-preview-body .ProseMirror table th :is(h1,h2,h3,h4,h5,h6) {
+
+  line-height: 1.2;
+  padding: 0 !important;
+  margin: 0 !important;
+}
+
+#gh-preview-body .ProseMirror .column-resize-handle {
+
+  position: absolute;
+  right: -1px; top: 0; bottom: 0;
+  width: 2px;
+  background: var(--accent, #2383e2);
+  pointer-events: none;
+  opacity: 0.35;
+}
+
+#gh-preview-body .ProseMirror.resize-cursor {
+
+  cursor: col-resize;
+}
+
+#gh-preview-body .ProseMirror .tableWrapper {
+
+  overflow-x: auto;
+  position: relative;
+}
+
+/* Images */
+#gh-preview-body .ProseMirror img {
+
+  max-width: 100%;
+  border-radius: 6px;
+  border: 2px solid var(--border-strong, rgba(15,15,15,0.12));
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+#gh-preview-body .ProseMirror img[data-align="left"] {
+
+  float: left;
+  margin: 4px 16px 8px 0;
+  max-width: 50%;
+}
+
+#gh-preview-body .ProseMirror img[data-align="right"] {
+
+  float: right;
+  margin: 4px 0 8px 16px;
+  max-width: 50%;
+}
+
+#gh-preview-body .ProseMirror h1, #gh-preview-body .ProseMirror h2, #gh-preview-body .ProseMirror h3,
+#gh-preview-body .ProseMirror h4, #gh-preview-body .ProseMirror h5, #gh-preview-body .ProseMirror h6,
+#gh-preview-body .ProseMirror hr, #gh-preview-body .ProseMirror pre,
+#gh-preview-body .ProseMirror table, #gh-preview-body .ProseMirror ul, #gh-preview-body .ProseMirror ol,
+#gh-preview-body .ProseMirror blockquote {
+
+  clear: both;
+}
+
+/* Lists */
+#gh-preview-body .ProseMirror ul,
+#gh-preview-body .ProseMirror ol {
+
+  padding-left: 1.5em;
+  /* 去掉浏览器默认的 ~1em 上下 margin：列表与上下文字的间距统一交给 > * + * 的 0.2em */
+  margin: 0;
+}
+
+/* 列表项不额外加垂直 margin：靠 line-height 决定行距，使插入列表后行距与正文一致 */
+#gh-preview-body .ProseMirror li {
+
+  margin: 0;
+}
+
+#gh-preview-body .ProseMirror li > p {
+
+  margin: 0;
+  /* 空列表项（只有一个换行占位）在重新加载笔记后，光标点不进、上下键会跳过。
+     给段落一个「一行高」的最小高度后，空行才有可命中的行盒，点击/方向键都能落入。
+     1lh = 一倍行高，随行距设置自适应；不支持时回退到 1.5em。 */
+  min-height: 1.5em;
+  min-height: 1lh;
+}
+
+/* Task list */
+#gh-preview-body .ProseMirror ul[data-type="taskList"] {
+
+  list-style: none;
+  padding-left: 0;
+}
+
+#gh-preview-body .ProseMirror ul[data-type="taskList"] li {
+
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5em;
+}
+
+#gh-preview-body .ProseMirror ul[data-type="taskList"] li > label {
+
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  /* 框高 = 首行行高（随编辑器字号/行高缩放）→ 复选框天然与首行文字垂直居中 */
+  height: calc(1em * var(--editor-line-height, 1.5));
+}
+
+#gh-preview-body .ProseMirror ul[data-type="taskList"] li > label input[type="checkbox"] {
+
+  /* 自绘复选框：原生控件在勾选/未勾选时渲染尺寸不一致，appearance:none 后完全由 CSS 控制。
+     尺寸用 em：跟随编辑器字体大小缩放，不会出现"字大了框还是小的"的违和感 */
+  appearance: none;
+  -webkit-appearance: none;
+  width: 1em;
+  height: 1em;
+  box-sizing: border-box;
+  margin: 0;
+  flex-shrink: 0;
+  border: 0.1em solid color-mix(in srgb, var(--text, #888) 45%, transparent);
+  border-radius: 0.25em;
+  background: transparent;
+  position: relative;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+#gh-preview-body .ProseMirror ul[data-type="taskList"] li > label input[type="checkbox"]:hover {
+
+  border-color: var(--accent, #4a9eff);
+}
+
+#gh-preview-body .ProseMirror ul[data-type="taskList"] li > label input[type="checkbox"]:checked {
+
+  background: var(--accent, #4a9eff);
+  border-color: var(--accent, #4a9eff);
+}
+
+#gh-preview-body .ProseMirror ul[data-type="taskList"] li > label input[type="checkbox"]:checked::after {
+
+  content: '';
+  position: absolute;
+  left: 0.22em;
+  top: 0.02em;
+  width: 0.26em;
+  height: 0.55em;
+  border: solid #fff;
+  border-width: 0 0.14em 0.14em 0;
+  transform: rotate(45deg);
+}
+
+/* 内容容器：撑满剩余宽度并允许收缩，保证空任务项也有光标立足处 */
+#gh-preview-body .ProseMirror ul[data-type="taskList"] li > div {
+
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Links */
+#gh-preview-body .ProseMirror a {
+
+  color: var(--accent, #4a9eff);
+  text-decoration: none;
+  border-bottom: 1px dashed color-mix(in srgb, var(--accent, #4a9eff) 50%, transparent);
+  transition: border-color 0.15s, background 0.15s;
+  border-radius: 2px;
+  padding: 0 1px;
+  cursor: pointer;
+}
+
+#gh-preview-body .ProseMirror a:hover {
+
+  border-bottom-color: var(--accent, #4a9eff);
+  border-bottom-style: solid;
+  background: color-mix(in srgb, var(--accent, #4a9eff) 8%, transparent);
+}
+
+#gh-preview-body .ProseMirror a {
+ position: relative;
+}
+
+/* 表格单元格在 .tableWrapper(overflow:auto) 内，::after 会被裁切；下划线已改为点一下打开，不再用提示。 */
+#gh-preview-body .ProseMirror .tableWrapper a:hover::after,
+#gh-preview-body .ProseMirror .tableWrapper a[href^="file:///"]:hover::after,
+#gh-preview-body .ProseMirror a:hover::after,
+#gh-preview-body .ProseMirror a[href^="file:///"]:hover::after {
+
+  content: none;
+  display: none;
+}
+
+/* 本地文件链接样式 */
+#gh-preview-body .ProseMirror a[href^="file:///"] {
+
+  color: var(--text);
+  border-bottom: 1px dashed var(--border-strong, rgba(15,15,15,0.2));
+  background: color-mix(in srgb, var(--text-tertiary) 8%, transparent);
+  padding: 1px 5px 1px 20px;
+  border-radius: 4px;
+  position: relative;
+  font-size: 0.92em;
+}
+
+#gh-preview-body .ProseMirror a[href^="file:///"]:before {
+
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 13px;
+  height: 13px;
+  background: currentColor;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm4 18H6V4h7v5h5v11z'/%3E%3C/svg%3E") center/contain no-repeat;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm4 18H6V4h7v5h5v11z'/%3E%3C/svg%3E") center/contain no-repeat;
+}
+
+#gh-preview-body .ProseMirror a[href^="file:///"]:hover {
+
+  background: color-mix(in srgb, var(--text-tertiary) 14%, transparent);
+  border-bottom-style: solid;
+}
+
+/* 还原后的下划线：前面自己带图标，文件不再用默认小文档标 */
+#gh-preview-body .ProseMirror a[data-zn-plain],
+#gh-preview-body .ProseMirror a.zn-plain-link {
+
+  color: var(--accent, #4a9eff);
+  background: none;
+  padding: 0 1px;
+  font-size: inherit;
+  border-radius: 2px;
+  border-bottom: 1px dashed color-mix(in srgb, var(--accent, #4a9eff) 50%, transparent);
+}
+
+#gh-preview-body .ProseMirror a[data-zn-plain][href^="file:///"]:before,
+#gh-preview-body .ProseMirror a.zn-plain-link[href^="file:///"]:before {
+
+  content: none;
+  display: none;
+}
+
+/* Highlight — 荧光笔风格：始终明亮底色 + 深色文字，各主题下都清晰可读 */
+#gh-preview-body .ProseMirror mark {
+
+  background: var(--highlight-bg, #fef08a);
+  color: #2a2820 !important;          /* 强制深色文字，盖过行内 color:inherit */
+  border-radius: 2px;
+  /* 纵向不再加 padding：背景≈字体盒高度，比字形略高即可，避免行距紧时与上一行高亮粘连；
+     仅留极小横向 padding 给左右一点呼吸 */
+  padding: 0 0.05em;
+}
+
+#gh-preview-body .ProseMirror mark[data-color="#bbf7d0"] {
+ background: #bbf7d0 !important;
+}
+
+#gh-preview-body .ProseMirror mark[data-color="#bfdbfe"] {
+ background: #bfdbfe !important;
+}
+
+#gh-preview-body .ProseMirror mark[data-color="#fecaca"] {
+ background: #fecaca !important;
+}
+
+#gh-preview-body .ProseMirror mark[data-color="#e9d5ff"] {
+ background: #e9d5ff !important;
+}
+
+#gh-preview-body .ProseMirror mark[data-color="#fed7aa"] {
+ background: #fed7aa !important;
+}
+
+/* 选中已高亮文字：用中性蓝选区，清楚表示"已选中"，不再与橙黄叠加成怪色 */
+#gh-preview-body .ProseMirror mark::selection {
+
+  background: rgba(120, 170, 255, 0.55);
+  color: #2a2820;
+}
+
+/* 深色模式：同样用明亮纯色底 + 深色文字（不用半透明，避免"屎黄/蒙了一层"） */
+body.theme-dark #gh-preview-body .ProseMirror mark {
+
+  background: #ffe066;
+  color: #2a2820 !important;
+}
+
+body.theme-dark #gh-preview-body .ProseMirror mark[data-color="#bbf7d0"] {
+ background: #b6ecca !important; color: #2a2820 !important;
+}
+
+body.theme-dark #gh-preview-body .ProseMirror mark[data-color="#bfdbfe"] {
+ background: #bcd6fb !important; color: #2a2820 !important;
+}
+
+body.theme-dark #gh-preview-body .ProseMirror mark[data-color="#fecaca"] {
+ background: #f6bcbc !important; color: #2a2820 !important;
+}
+
+body.theme-dark #gh-preview-body .ProseMirror mark[data-color="#e9d5ff"] {
+ background: #e0c8fb !important; color: #2a2820 !important;
+}
+
+body.theme-dark #gh-preview-body .ProseMirror mark[data-color="#fed7aa"] {
+ background: #f7d3a6 !important; color: #2a2820 !important;
+}
+
+body.theme-dark #gh-preview-body .ProseMirror mark::selection {
+
+  background: rgba(120, 170, 255, 0.5);
+  color: #2a2820;
+}
+
+/* 悬停高亮色块：实时把该颜色预览到当前选区（普通文字 + 已高亮文字都跟着变） */
+body.hl-previewing #gh-preview-body .ProseMirror ::selection,
+body.hl-previewing #gh-preview-body .ProseMirror mark::selection {
+
+  background: var(--hl-preview, #fef08a) !important;
+  color: #2a2820 !important;
+}
+
+/* 点击高亮项后、本次气泡未消失前：选区让出，让刚涂上的高亮透出来，便于预览效果 */
+body.hl-applied-preview #gh-preview-body .ProseMirror mark::selection {
+
+  background: transparent !important;
+  color: #2a2820 !important;
+}
+
+/* Placeholder */
+#gh-preview-body .ProseMirror p.is-editor-empty:first-child::before {
+
+  content: attr(data-placeholder);
+  float: left;
+  color: var(--text-tertiary, #aaa);
+  pointer-events: none;
+  height: 0;
+}
+
+/* Focus outline */
+#gh-preview-body .ProseMirror:focus {
+
+  outline: none;
+}
+
+/* ===== Image selected state ===== */
+#gh-preview-body .ProseMirror img.ProseMirror-selectednode {
+
+  outline: 2px solid var(--accent, #2383e2);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* ========== 阅读模式（样式仅 caret；提示见 #editor-mode-bar） ========== */
+body.readonly-mode #gh-preview-body .ProseMirror {
+
+  caret-color: transparent;
+  cursor: default;
+}
+
+/* ========== 跨设备同步保护 ========== */
+body.sync-protection-mode #gh-preview-body .ProseMirror {
+
+  caret-color: transparent;
+  cursor: default;
+}
+
+/* ========== 挖空模式 ========== */
+/* 同时匹配 [data-color]，否则各主题里带颜色的高亮（更高特异度）盖不住，挖空会失效 */
+body.cloze-mode #gh-preview-body .ProseMirror mark,
+body.cloze-mode #gh-preview-body .ProseMirror mark[data-color] {
+
+  background: var(--cloze-mask-bg, var(--text)) !important;
+  color: transparent !important;
+  border-radius: 3px;
+  cursor: help;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+body.cloze-mode #gh-preview-body .ProseMirror mark:hover,
+body.cloze-mode #gh-preview-body .ProseMirror mark[data-color]:hover {
+
+  background: var(--cloze-reveal-bg, rgba(255, 200, 0, 0.35)) !important;
+  color: inherit !important;
+}
+
+/* ===== 引用胶囊 / 通栏入口 ===== */
+#gh-preview-body .ProseMirror .zn-mention {
+
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 7px 1px 4px;
+  margin: 0;
+  border: 0;
+  border-radius: 5px;
+  background: rgba(128, 128, 128, 0.05);
+  box-shadow: inset 0 0 0 1px rgba(128, 128, 128, 0.28);
+  vertical-align: baseline; cursor: pointer; position: relative;
+  white-space: nowrap; font-size: 1em; line-height: 1.25;
+  user-select: none; -webkit-user-select: none;
+}
+
+#gh-preview-body .ProseMirror .zn-mention:hover {
+
+  background: rgba(128, 128, 128, 0.09);
+}
+
+body.theme-light #gh-preview-body .ProseMirror .zn-mention,
+body.theme-solarized-light #gh-preview-body .ProseMirror .zn-mention {
+
+  background: rgba(15, 15, 15, 0.03);
+  box-shadow: inset 0 0 0 1px rgba(15, 15, 15, 0.14);
+}
+
+body.theme-light #gh-preview-body .ProseMirror .zn-mention:hover,
+body.theme-solarized-light #gh-preview-body .ProseMirror .zn-mention:hover {
+
+  background: rgba(15, 15, 15, 0.06);
+}
+
+body.theme-dark #gh-preview-body .ProseMirror .zn-mention {
+
+  background: rgba(255, 255, 255, 0.04);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+}
+
+body.theme-dark #gh-preview-body .ProseMirror .zn-mention:hover {
+
+  background: rgba(255, 255, 255, 0.07);
+}
+
+#gh-preview-body .ProseMirror .zn-mn-ico,
+#gh-preview-body .ProseMirror .zn-pl-ico {
+
+  width: 1.15em; height: 1.15em; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 14px; line-height: 1;
+}
+
+#gh-preview-body .ProseMirror .zn-mn-t {
+
+  overflow: hidden; text-overflow: ellipsis; max-width: 16em;
+}
+
+#gh-preview-body .ProseMirror .zn-mn-ext {
+
+  font-size: 11px; color: var(--text-tertiary); margin-left: 1px;
+}
+
+#gh-preview-body .ProseMirror .zn-pagelink {
+
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; margin: 6px 0 10px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg-secondary); cursor: pointer;
+  user-select: none; -webkit-user-select: none;
+}
+
+#gh-preview-body .ProseMirror .zn-pagelink:hover {
+ background: var(--bg-hover); border-color: var(--border-strong);
+}
+
+#gh-preview-body .ProseMirror .zn-pl-ico {
+ font-size: 18px; width: 28px;
+}
+
+#gh-preview-body .ProseMirror .zn-pl-body {
+ min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px;
+}
+
+#gh-preview-body .ProseMirror .zn-pl-t {
+ font-weight: 600; font-size: 14.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+#gh-preview-body .ProseMirror .zn-pl-path {
+ font-size: 12px; color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+#gh-preview-body .ProseMirror .zn-mention.ProseMirror-selectednode {
+
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+
+#gh-preview-body .ProseMirror .zn-pagelink.ProseMirror-selectednode {
+
+  outline: 2px solid var(--accent); outline-offset: 0;
+}
+
+/* 鈹€鈹€ 版本历史弹窗布局（git-sync 功能，见 app.js openNoteHistory） 鈹€鈹€ */
+#modal-dialog.git-history-modal { width: min(960px, 94vw); height: min(640px, 88vh); max-width: 94vw; max-height: 88vh; min-width: 0; min-height: 0; }
+#modal-dialog.git-history-modal .modal-body { padding: 0; overflow: hidden; }
+.gh-wrap { display: flex; flex: 1; min-height: 0; width: 100%; }
+.gh-list { width: 270px; flex-shrink: 0; border-right: 1px solid var(--border); overflow-y: auto; padding: 8px; background: var(--bg-secondary); }
+.gh-list-item { display: block; width: 100%; text-align: left; padding: 9px 10px; margin-bottom: 4px; border: 1px solid transparent; border-radius: var(--radius); background: transparent; color: var(--text-secondary); font-size: 12.5px; line-height: 1.45; cursor: pointer; }
+.gh-list-item:hover { background: var(--hover); }
+.gh-list-item.active { background: var(--accent-bg); border-color: var(--accent); color: var(--text); }
+.gh-list-date { display: block; font-weight: 600; font-size: 12px; }
+.gh-list-msg { display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gh-list-oid { display: block; margin-top: 3px; font-size: 10.5px; color: var(--text-tertiary); font-family: ui-monospace, 'SF Mono', Consolas, monospace; }
+.gh-state { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px 12px; color: var(--text-tertiary); font-size: 12.5px; line-height: 1.6; text-align: center; }
+.gh-preview { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.gh-preview-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.gh-preview-meta { font-size: 12px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gh-preview-body { flex: 1; overflow-y: auto; padding: 16px 20px; font-size: 14px; color: var(--text); line-height: 1.7; }
+@media (max-width: 640px) {
+  .gh-wrap { flex-direction: column; }
+  .gh-list { width: 100%; max-height: 200px; border-right: none; border-bottom: 1px solid var(--border); }
+}

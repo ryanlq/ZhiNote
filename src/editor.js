@@ -2932,6 +2932,79 @@ const editor = (() => {
     }
   }
 
+  // 主编辑器与版本历史预览共用的扩展列表（不含 crdtUndoKeymap / BubbleMenu：
+  // 预览是只读静态渲染，不需要撤销键位与浮动条）。
+  function _ghPreviewExtensions() {
+    return [
+      ZnBlockquote,
+      ToggleSummary,
+      ToggleContent,
+      Toggle,
+      ToggleQuoteInput,
+      CustomCodeBlock.configure({
+        languageClassPrefix: 'language-',
+        HTMLAttributes: { class: 'code-block' },
+        enableTabIndentation: true,   // 代码块内 Tab=插入空格、Shift+Tab=反缩进
+        tabSize: 2,
+      }),
+      // priority 拉高 → highlight 在 schema 里排到 bold/italic 之前，成为"外层" mark。
+      Highlight.extend({
+        priority: 1000,
+        // 序列化为 HTML <mark> 而非 ==…==（与 _inlineNodesToHtml 同规则）；解析端 multicolor 读 data-color/style。
+        renderMarkdown(node, helpers) {
+          const inner = helpers.renderChildren(node);
+          const color = node && node.attrs && node.attrs.color;
+          if (color) {
+            const c = _escHtml(color);
+            return `<mark data-color="${c}" style="background-color: ${c}; color: inherit">${inner}</mark>`;
+          }
+          return `<mark>${inner}</mark>`;
+        },
+      }).configure({ multicolor: true }),
+      Underline,
+      TextAlign.configure({ types: ['paragraph', 'heading', 'toggleSummary'], alignments: ['left', 'center', 'right', 'justify'] }),
+      Link.extend({
+        inclusive() { return false; },
+        addAttributes() {
+          return {
+            ...this.parent?.(),
+            plain: {
+              default: false,
+              parseHTML: (el) => el.getAttribute('data-zn-plain') === '1',
+              renderHTML: (attrs) => (attrs.plain ? { 'data-zn-plain': '1', class: 'zn-plain-link' } : {}),
+            },
+            icon: {
+              default: '',
+              parseHTML: (el) => el.getAttribute('data-zn-icon') || '',
+              renderHTML: (attrs) => (attrs.icon ? { 'data-zn-icon': attrs.icon } : {}),
+            },
+          };
+        },
+      }).configure({
+        openOnClick: false,
+        autolink: true,
+        protocols: ['http', 'https', 'mailto', 'tel', { scheme: 'file', optionalSlashes: true }],
+        validate: () => true,
+      }),
+      MdImage.configure({ inline: true, allowBase64: true }),
+      CustomTable.configure({ resizable: true }),
+      TableRow,
+      TableCell,
+      TableHeader,
+      TaskList,
+      TaskItem.configure({ nested: true }),
+      Placeholder.configure({ placeholder: '开始写作吧… 输入 / 可插入常用片段' }),
+      Markdown.configure({ markedOptions: { gfm: true, breaks: true } }),
+      MathInline,
+      MathBlock,
+      CalendarBlock,
+      ZhichatBlock,
+      ZnMention,
+      ZnPageLink,
+      ZnEmoji,
+    ];
+  }
+
   function initEditor() {
     if (_editor) return _editor;
 
@@ -2988,11 +3061,7 @@ const editor = (() => {
           //   本编辑器是 TipTap v3，关历史的开关是 undoRedo:false（不是 v2 的 history）。
           ...(_bound ? { undoRedo: false } : {}),
         }),
-        ZnBlockquote,
-        ToggleSummary,
-        ToggleContent,
-        Toggle,
-        ToggleQuoteInput,
+        ..._ghPreviewExtensions(),
         // 绑定模式：yUndoPlugin 只提供 undo/redo 函数、不绑快捷键，需自己补 Ctrl+Z / Ctrl+Y。
         ...(_bound ? [Extension.create({
           name: 'crdtUndoKeymap',
@@ -3005,72 +3074,6 @@ const editor = (() => {
             };
           },
         })] : []),
-        CustomCodeBlock.configure({
-          languageClassPrefix: 'language-',
-          HTMLAttributes: { class: 'code-block' },
-          enableTabIndentation: true,   // 代码块内 Tab=插入空格、Shift+Tab=反缩进
-          tabSize: 2,
-        }),
-        // priority 拉高 → highlight 在 schema 里排到 bold/italic 之前，成为"外层" mark，
-        // 这样"高亮文字里夹着加粗/斜体"或跨软换行时不会被拆成多个 <mark>（修复连续高亮被拆块、挖空逐块）
-        Highlight.extend({
-          priority: 1000,
-          // 序列化为 HTML <mark> 而非 ==…==，统一与表格/列表 HTML 路径一致（见 _inlineNodesToHtml）：
-          //  ① 颜色随 data-color 持久化——==…== 没有颜色位，旧实现一切换笔记就丢色变回默认黄；
-          //  ② 与加粗 ** 重叠时不再生成 ==**…**== 这种与 marked 分词器撞车、往返后漏出字面 ** 的结构。
-          // 解析端：multicolor 的 parseHTML 读 data-color/style；旧 ==…== 的输入分词器保留 → 旧笔记仍可读。
-          // 该序列化器仅用于导出 .md / 旧 md 派生；内部存储已走 doc(JSON)，显示不再经 markdown 往返。
-          renderMarkdown(node, helpers) {
-            const inner = helpers.renderChildren(node);
-            const color = node && node.attrs && node.attrs.color;
-            if (color) {
-              const c = _escHtml(color);
-              return `<mark data-color="${c}" style="background-color: ${c}; color: inherit">${inner}</mark>`;
-            }
-            return `<mark>${inner}</mark>`;
-          },
-        }).configure({ multicolor: true }),
-        Underline,
-        TextAlign.configure({ types: ['paragraph', 'heading', 'toggleSummary'], alignments: ['left', 'center', 'right', 'justify'] }),
-        Link.extend({
-          inclusive() { return false; },
-          addAttributes() {
-            return {
-              ...this.parent?.(),
-              plain: {
-                default: false,
-                parseHTML: (el) => el.getAttribute('data-zn-plain') === '1',
-                renderHTML: (attrs) => (attrs.plain ? { 'data-zn-plain': '1', class: 'zn-plain-link' } : {}),
-              },
-              icon: {
-                default: '',
-                parseHTML: (el) => el.getAttribute('data-zn-icon') || '',
-                renderHTML: (attrs) => (attrs.icon ? { 'data-zn-icon': attrs.icon } : {}),
-              },
-            };
-          },
-        }).configure({
-          openOnClick: false,
-          autolink: true,
-          protocols: ['http', 'https', 'mailto', 'tel', { scheme: 'file', optionalSlashes: true }],
-          validate: () => true,
-        }),
-        MdImage.configure({ inline: true, allowBase64: true }),
-        CustomTable.configure({ resizable: true }),
-        TableRow,
-        TableCell,
-        TableHeader,
-        TaskList,
-        TaskItem.configure({ nested: true }),
-        Placeholder.configure({ placeholder: '开始写作吧… 输入 / 可插入常用片段' }),
-        Markdown.configure({ markedOptions: { gfm: true, breaks: true } }),
-        MathInline,
-        MathBlock,
-        CalendarBlock,
-        ZhichatBlock,
-        ZnMention,
-        ZnPageLink,
-        ZnEmoji,
         // 浮动条分两套机制（触屏端曾把"跟随选区"的桌面插件硬改成 dock 条，三层 hack 极脆）：
         // · 桌面 = Tiptap BubbleMenu 插件（Floating UI 跟随选区，工作稳定，保持不动）；
         // · 触屏 = 不注册插件，#bubble-menu 常驻 DOM 由下方 dock 控制器自管理显隐，
@@ -5580,6 +5583,65 @@ const editor = (() => {
     reloadCurrent();
   }
 
+  // ── 版本历史预览（git-sync 弹窗用）─────────────────────────────────
+  // 懒创建离屏只读编辑器：挂在 #editor 内部 → 渲染时复用 #editor .ProseMirror 的
+  // 全部样式规则；渲染后读取 view.dom.innerHTML（KaTeX/图片 NodeView 均已同步渲染）。
+  // 返回的 HTML 注入弹窗后脱离 #editor 祖先，由 styles.css 末尾的镜像规则接管样式。
+  let _ghPreview = null;
+  function _ensureGhPreview() {
+    if (_ghPreview) return _ghPreview;
+    const editorEl = document.getElementById('editor');
+    if (!editorEl) return null;
+    const host = document.createElement('div');
+    host.id = 'gh-preview-host';
+    host.style.cssText = 'position:fixed;left:-99999px;top:0;width:760px;pointer-events:none;';
+    editorEl.appendChild(host);
+    try {
+      _ghPreview = new Editor({
+        element: host,
+        editable: false,
+        extensions: [
+          StarterKit.configure({
+            heading: { levels: [1, 2, 3, 4, 5, 6] },
+            codeBlock: false,
+            link: false,
+            underline: false,
+            blockquote: false,
+          }),
+          ..._ghPreviewExtensions(),
+        ],
+        editorProps: { attributes: { class: 'tiptap-editor' } },
+      });
+    } catch (e) {
+      console.warn('[editor] 版本历史预览编辑器创建失败', e);
+      try { host.remove(); } catch (_) {}
+      return null;
+    }
+    return _ghPreview;
+  }
+
+  /** 把 markdown 渲染成 HTML 字符串（版本历史预览用，与主编辑器主路径一致）。 */
+  function renderMdPreviewHtml(md) {
+    const view = _ensureGhPreview();
+    if (!view) return '';
+    try {
+      // 先 parseMdToDoc（含 math 预处理）再灌 doc JSON——与 open() 的主路径一致。
+      view.commands.setContent(parseMdToDoc(md || ''), { emitUpdate: false });
+    } catch (e) {
+      console.warn('[renderMdPreviewHtml]', e);
+      return '';
+    }
+    // 图片兜底：NodeView 已同步解析（_imgDataCache / getLocalImage），只剩缓存未命中的
+    // zhinote://img/<hash> 换占位图（异步回填发生在读 innerHTML 之后，来不及）。
+    return view.view.dom.innerHTML.replace(
+      /(<img[^>]*?src=")zhinote:\/\/img\/([a-z0-9]+)(")/gi,
+      (m, pre, hash, post) => {
+        const local = window.storage?.getLocalImage?.(hash);
+        return pre + (local || missingImagePlaceholderDataUrl(0, 0, '图片存于其他设备')) + post;
+      }
+    );
+  }
+
   return {
     initEditor, open, close, reloadCurrent, refreshTitle, goBack,
     flushSave, scheduleSave, setTheme, setReadonly, refreshOutline,
@@ -5594,6 +5656,7 @@ const editor = (() => {
     toggleMarkdownSource, isMarkdownSourceOpen,
     // 阶段1 基础设施
     serializeDocToMd, parseMdToDoc, docToPlainText, walkDocImages, docIsEmpty,
+    renderMdPreviewHtml,
   };
 })();
 

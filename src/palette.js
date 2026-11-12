@@ -34,6 +34,7 @@ const palette = (() => {
     { id: 'cmd-quick-capture', label: '速记设置（剪贴板存到哪）', icon: '⚡', run: () => { try { window.quickCaptureSetup?.(); } catch (_) {} } },
     { id: 'cmd-export', label: '导出笔记或备份', icon: '⇣', run: () => window.requestExport?.() },
     { id: 'cmd-import', label: '导入笔记或备份', icon: '⇡', run: () => window.requestImport?.() },
+    { id: 'cmd-note-history', label: '版本历史（Git 同步）', icon: '⏱', run: () => { try { window.openNoteHistory?.(); } catch (_) {} } },
     { id: 'cmd-collapse', label: '折叠所有笔记节点', icon: '◢', run: () => { tree.collapseAllAnimated(); } },
     { id: 'cmd-expand', label: '展开所有笔记节点', icon: '◣', run: () => { tree.expandAllAnimated(); } },
   ];

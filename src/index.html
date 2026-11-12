@@ -149,6 +149,9 @@
           <button id="btn-cloze" class="icon-btn" title="挖空复习">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 10 8 10 8a17 17 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><path d="M6.61 6.61A13.5 13.5 0 0 0 2 12s3 8 10 8a9.7 9.7 0 0 0 5.39-1.61"/><line x1="2" y1="2" x2="22" y2="22"/></svg>
           </button>
+          <button id="btn-history" class="icon-btn hidden" title="版本历史（Git 同步）">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg>
+          </button>
           <button id="btn-cloud-sync" class="icon-btn" title="云同步">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19a4.5 4.5 0 1 0 0-9h-1.27A8 8 0 1 0 3 16.3"/><polyline points="8 17 12 21 16 17"/><line x1="12" y1="12" x2="12" y2="21"/></svg>
             <span id="cloud-sync-dot" class="cloud-badge"></span>
@@ -358,7 +361,7 @@
   <link rel="stylesheet" href="katex.min.css">
   <script defer src="katex.min.js"></script>
   <script>
-    window.__MD_VER__ = '20260821t4';
+    window.__MD_VER__ = '20261112t1';
     // 小枝第一套：Cloudflare 代取（见 docs/emoji-proxy-worker.js）；失败自动回退谷歌
     window.__NOTO_EMO_HOST__ = 'https://emoji.zhinote.net';
   </script>
@@ -367,8 +370,12 @@
   <script src="selfhost.js?v=1"></script>
   <script src="text-search-engine.js"></script>
   <script src="order.js?v=20260814t5"></script>
+  <script src="lightning-fs.min.js?v=1"></script>
+  <script src="isogit.umd.min.js?v=1"></script>
+  <script src="isogit-http.js?v=1"></script>
   <script src="storage.js?v=20260820t12"></script>
   <script src="webdav-sync.js?v=20260820t12"></script>
+  <script src="git-sync.js?v=1"></script>
 
   <script src="tree.js?v=20260820t5"></script>
   <script src="search.js?v=20260730t24"></script>
