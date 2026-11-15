@@ -550,8 +550,10 @@
   // ---- 同步周期 ----
   async function syncCycle(kind, opts) {
     opts = opts || {};
-    if (_syncing) { schedulePut('busy-reschedule'); return; }
-    if (!_lock()) { log('他标签正在同步，跳过本轮'); return; }
+    const skipPush = !!opts.skipPush;   // pull：只拉不推
+    const skipMerge = !!opts.skipMerge; // push：只推不拉
+    if (_syncing) { schedulePut('busy-reschedule'); return { ok: false, skipped: true }; }
+    if (!_lock()) { log('他标签正在同步，跳过本轮'); return { ok: false, skipped: true }; }
     _syncing = true; _uiBusy++;
     emitStart(kind, opts.silent);
     let pushed = false, applied = new Set(), exported = 0;
@@ -589,8 +591,24 @@
       await git.fetch({ fs: _fs, http: window.gitHttp, dir: DIR, url: c.url, branch: c.branch, onAuth: onAuth });
       const remoteNew = await git.resolveRef({ fs: _fs, dir: DIR, ref: 'refs/remotes/origin/' + c.branch }).catch(() => null);
 
-      // 3) 远端有新内容 → 快进 / merge commit / 冲突按文件 keep-both
-      if (remoteNew && remoteNew !== localHead) {
+      // ---- push 模式：不合并、不应用远端；推送前先判分叉，绝不 force ----
+      if (skipMerge) {
+        // push 不带 force（_push 默认），isomorphic-git 遇非快进本就会拒绝；这里只做「提前友好提示」。
+        if (remoteNew && localHead && remoteNew !== localHead) {
+          try {
+            const bases = await git.findMergeBase({ fs: _fs, dir: DIR, oids: [localHead, remoteNew] });
+            const base = bases && bases[0];
+            // 远端 HEAD 不是本地 HEAD 的祖先 → 远端另有提交 → 提前拒绝，给出可操作的提示
+            if (base && base !== remoteNew) {
+              throw new Error('远端有本地没有的提交，请先「拉取」合并后再推送（不会强制覆盖远端）');
+            }
+          } catch (e) {
+            if (e && /请先/.test(e.message)) throw e;   // 上面主动抛的中文提示，原样透出
+            /* 其余（API 不可用等）交给 _push 的非快进拒绝兜底，catch 里翻译成中文 */
+          }
+        }
+      } else if (remoteNew && remoteNew !== localHead) {
+        // 3) 远端有新内容 → 快进 / merge commit / 冲突按文件 keep-both
         let merged = false;
         try {
           await git.merge({ fs: _fs, http: window.gitHttp, dir: DIR, theirs: 'refs/remotes/origin/' + c.branch, fastForwardOnly: true });
@@ -612,16 +630,32 @@
         if (remoteOld !== remoteNew) applied = await _applyRemote(remoteOld, remoteNew);
       }
 
-      // 5) 推送（本地提交 / merge commit）
-      if (pushed) await _push();
+      // 5) 推送（完整同步 / push 模式）；pull 模式跳过
+      let doPush = false;
+      if (!skipPush) doPush = pushed || (skipMerge && !!localHead);
+      if (doPush) await _push();
       _saveExported();
 
-      emitOk(kind === 'put' ? 'put' : 'get', { uploaded: exported, downloadedNoteIds: applied }, opts.silent);
+      const detail = skipMerge ? 'push' : (skipPush ? 'pull' : (kind === 'put' ? 'put' : 'get'));
+      emitOk(detail, { uploaded: exported, downloadedNoteIds: applied }, opts.silent);
       try { if (_bc && kind !== 'wake') _bc.postMessage('synced'); } catch (_) {}
       _hasRemoteNotes = true;
+      return {
+        ok: true, mode: skipMerge ? 'push' : (skipPush ? 'pull' : 'sync'),
+        pushed: doPush, uploaded: exported, downloaded: applied.size,
+        nothingToPush: !!(skipMerge && !pushed && remoteNew === localHead),
+      };
     } catch (e) {
       log('同步失败：' + (e && (e.stack || e.message || e.code) || e));
-      emitFail(e, opts.silent);
+      let err = e;
+      if (skipMerge) {
+        const m = String((e && (e.message || e.code)) || e);
+        if (/reject|non-fast-forward|fetch first|not a fast|fetch.*first|failed to push|cannot push/i.test(m)) {
+          err = new Error('远端有本地没有的提交，推送被拒绝。请先「拉取」合并后再推送（不会强制覆盖远端）');
+        }
+      }
+      emitFail(err, opts.silent);
+      return { ok: false, error: String((err && err.message) || err) };
     } finally {
       _syncing = false; _uiBusy = Math.max(0, _uiBusy - 1); _unlock();
       _putAt = Date.now();
@@ -653,7 +687,7 @@
   function stop() {
     if (_putTimer) { clearTimeout(_putTimer); _putTimer = null; }
   }
-  async function manualSync() { await syncCycle('manual'); }
+  async function manualSync() { return await syncCycle('manual'); }
   function isSyncing() { return _syncing; }
   function isUiSyncing() { return _uiBusy > 0 || _syncing; }
   async function testConnection(over) {
@@ -701,6 +735,89 @@
     return v;
   }
 
+  // ---- 阶段3：Git 侧面板（独立 pull / push + 状态 + 提交记录）----
+  // 面板读取一律走「本地已有仓库」，绝不主动 clone / 联网；只有 pull / push 才触网。
+  async function _localReady() {
+    if (!_fs) { try { _fs = new window.LightningFS(FS_NAME); } catch (_) { return false; } }
+    try { return !!(await git.resolveRef({ fs: _fs, dir: DIR, ref: 'HEAD' })); } catch (_) { return false; }
+  }
+  async function _countSince(ref, stopOid) {
+    if (!ref || ref === stopOid) return 0;
+    let arr = [];
+    try { arr = await git.log({ fs: _fs, dir: DIR, ref: ref, depth: 200 }); } catch (_) { return 0; }
+    let n = 0;
+    for (const x of arr) { if (x.oid === stopOid) return n; n++; }
+    return n;  // 触到 depth 上限，返回已知下界
+  }
+
+  /** 只拉：把远端改动取回并合并进本地（pull 前先 commit 本地改动保住，不推送）。 */
+  async function pull(opts) {
+    return await syncCycle('manual', Object.assign({ skipPush: true, silent: true }, opts || {}));
+  }
+  /** 只推：把本地改动 commit 后推送（先 fetch 判分叉，分叉则拒绝，绝不 force；不合并、不改本地笔记）。 */
+  async function push(opts) {
+    return await syncCycle('manual', Object.assign({ skipMerge: true, silent: true }, opts || {}));
+  }
+
+  /** 面板状态：分支 / HEAD / 领先落后 / 上次同步 / 待同步改动。不联网。 */
+  async function getStatus() {
+    const c = cfg();
+    const out = {
+      configured: !!c.url, url: c.url, branch: c.branch,
+      author: c.an + ' <' + c.ae + '>',
+      state: _state, error: _lastError, syncing: _syncing,
+      lastSync: _lastSyncTime, repoReady: false,
+      head: null, remote: null, ahead: 0, behind: 0, dirtyNotes: 0,
+    };
+    try { out.dirtyNotes = (S().getDirtyNoteIds && S().getDirtyNoteIds() || []).length; } catch (_) {}
+    if (!c.url || !(await _localReady())) return out;
+    out.repoReady = true;
+    try { out.head = await git.resolveRef({ fs: _fs, dir: DIR, ref: 'HEAD' }); } catch (_) {}
+    try { out.remote = await git.resolveRef({ fs: _fs, dir: DIR, ref: 'refs/remotes/origin/' + c.branch }); } catch (_) {}
+    if (out.head && out.remote) {
+      if (out.head !== out.remote) {
+        try {
+          const bases = await git.findMergeBase({ fs: _fs, dir: DIR, oids: [out.head, out.remote] });
+          const base = bases && bases[0];
+          if (base) { out.ahead = await _countSince(out.head, base); out.behind = await _countSince(out.remote, base); }
+        } catch (_) {}
+      }
+    } else if (out.head) {
+      // 从没 fetch 过：本地提交都算待推送
+      try { out.ahead = (await git.log({ fs: _fs, dir: DIR, depth: 200 })).length; } catch (_) {}
+    }
+    return out;
+  }
+
+  /** 整仓提交时间线（不带 filepath = 全部提交，不只是单篇笔记）。 */
+  async function listCommits(opts) {
+    opts = opts || {};
+    if (!(await _localReady())) return [];
+    const depth = Math.max(1, Math.min(200, opts.depth || 40));
+    let arr = [];
+    try { arr = await git.log({ fs: _fs, dir: DIR, depth: depth }); } catch (_) { return []; }
+    return arr.map(function (x) {
+      return {
+        oid: x.oid,
+        date: x.commit.author.timestamp * 1000,
+        message: (x.commit.message || '').trim(),
+        author: (x.commit.author && x.commit.author.name) || '',
+        parent: (x.commit.parent && x.commit.parent[0]) || null,
+      };
+    });
+  }
+
+  /** 某次提交改了哪些文件（相对父提交）；用于面板点开一条记录看详情。 */
+  async function commitDetail(oid) {
+    if (!(await _localReady())) return { changed: [], removed: [] };
+    try {
+      const commit = await git.readCommit({ fs: _fs, dir: DIR, oid: oid });
+      const parent = (commit.commit.parent && commit.commit.parent[0]) || null;
+      const d = await _diffTrees(parent, oid);
+      return { changed: Object.keys(d.changed).sort(), removed: Object.keys(d.removed).sort() };
+    } catch (_) { return { changed: [], removed: [] }; }
+  }
+
   window.gitSync = {
     loadConfig: loadConfig, startAutoSync: startAutoSync, stop: stop,
     schedulePut: schedulePut, flushPutOnHide: flushPutOnHide,
@@ -708,5 +825,7 @@
     isSyncing: isSyncing, isUiSyncing: isUiSyncing,
     getState: function () { return { state: _state, lastSync: _lastSyncTime, error: _lastError }; },
     listNoteHistory: listNoteHistory, readNoteVersion: readNoteVersion, restoreNoteVersion: restoreNoteVersion,
+    pull: pull, push: push, getStatus: getStatus,
+    listCommits: listCommits, commitDetail: commitDetail,
   };
 })();

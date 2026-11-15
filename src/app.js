@@ -4530,6 +4530,7 @@ function _updateHistoryBtn() {
   if (!btn) return;
   const on = (storage.getSetting('syncMethod') || 'none') === 'git' && !!window.gitSync;
   btn.classList.toggle('hidden', !on);
+  try { _updateGitPanelBtn(); } catch (_) {}
 }
 
 /** 版本历史弹窗（Git 同步）：左侧版本列表，右侧 Markdown 预览，可还原。 */
@@ -4672,6 +4673,190 @@ async function openNoteHistory() {
 window.openNoteHistory = openNoteHistory;
 
 
+/* ===== Git 同步侧面板：状态 / 独立 pull·push / 提交记录 =====
+ * 只在 syncMethod === 'git' 时出现（顶栏 btn-git-panel）。
+ * pull / push 调 gitSync 的独立动作，不复用 smartCloudSync 的一锅端同步；
+ * 面板读状态与提交记录一律本地、不联网，只有按 pull/push/立即同步 才触网。 */
+const GP_OPEN_KEY = 'zhinote-git-panel-open';
+let _gpBusy = false;
+let _gpLogSeq = 0;
+
+function _gpEl() { return document.getElementById('git-panel'); }
+function _gitPanelOpen() { const p = _gpEl(); return !!p && !p.classList.contains('hidden'); }
+function _gpFmtTime(ms) {
+  if (!ms) return '—';
+  const d = new Date(ms), p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+function _gpErr(s) {
+  s = String(s == null ? '' : s);
+  // 我们自己写的中文提示（含「请先 / 拒绝 / 强制」等）原样显示，别被通用错误包装套一层
+  if (/[\u4e00-\u9fa5]/.test(s) && /请先|拒绝|强制|没有|失败|未配置|未就绪|不是/.test(s)) return s;
+  return _zhSyncError(s);
+}
+
+/** 顶栏 Git 面板按钮可见性：仅 Git 同步且后端就绪时显示；非 Git 模式顺手收起面板。 */
+function _updateGitPanelBtn() {
+  const btn = document.getElementById('btn-git-panel');
+  if (!btn) return;
+  const on = (storage.getSetting('syncMethod') || 'none') === 'git' && !!window.gitSync;
+  btn.classList.toggle('hidden', !on);
+  if (!on) _setGitPanelOpen(false, false);
+}
+
+function _setGitPanelOpen(open, remember) {
+  const p = _gpEl();
+  if (!p) return;
+  p.classList.toggle('hidden', !open);
+  const backdrop = document.getElementById('git-panel-backdrop');
+  if (backdrop) backdrop.classList.toggle('hidden', !open);
+  document.getElementById('btn-git-panel')?.classList.toggle('active', open);
+  document.body.classList.toggle('git-panel-open', open);
+  if (remember !== false) { try { localStorage.setItem(GP_OPEN_KEY, open ? '1' : '0'); } catch (_) {} }
+  if (open) refreshGitPanel();
+}
+function toggleGitPanel() { _setGitPanelOpen(!_gitPanelOpen()); }
+window.toggleGitPanel = toggleGitPanel;
+
+function _gpStatusHtml(st) {
+  if (!st.configured) return '<div class="gp-hint">还没配置 Git 仓库，去「设置 → 同步」填好再回来。</div>';
+  let cls = 'ok', txt = '已同步';
+  if (st.syncing || _gpBusy) { cls = 'busy'; txt = '同步中…'; }
+  else if (st.state === 'error') { cls = 'err'; txt = '同步失败'; }
+  else if (st.dirtyNotes > 0) { cls = 'local'; txt = '有待同步改动'; }
+  else if (st.ahead > 0) { cls = 'local'; txt = '本地领先 ' + st.ahead + ' 个提交'; }
+  else if (st.behind > 0) { cls = 'behind'; txt = '远端领先 ' + st.behind + ' 个提交'; }
+  const rows = [
+    ['状态', '<span class="gp-badge ' + cls + '">' + txt + '</span>'],
+    ['分支', '<code>' + escapeHtml(st.branch) + '</code>'],
+    ['本地 HEAD', '<code>' + escapeHtml(st.head ? String(st.head).slice(0, 8) : '—') + '</code>'],
+    ['领先 / 落后', '<span class="gp-ahead">↑ ' + st.ahead + '</span>　<span class="gp-behind">↓ ' + st.behind + '</span>'],
+    ['待同步改动', st.dirtyNotes + ' 项'],
+    ['上次同步', escapeHtml(_gpFmtTime(st.lastSync))],
+  ];
+  if (st.author) rows.push(['提交署名', escapeHtml(st.author)]);
+  if (st.url) rows.push(['仓库', '<span class="gp-url" title="' + escapeHtml(st.url) + '">' + escapeHtml(st.url) + '</span>']);
+  let html = '<div class="gp-rows">' + rows.map((r) =>
+    '<div class="gp-row"><span class="gp-k">' + r[0] + '</span><span class="gp-v">' + r[1] + '</span></div>').join('') + '</div>';
+  if (!st.repoReady) html += '<div class="gp-hint">本地仓库还没建好，点一次「拉取」或「立即同步」就会初始化。</div>';
+  if (st.error) html += '<div class="gp-err">' + escapeHtml(_gpErr(st.error)) + '</div>';
+  return html;
+}
+
+function _gpRenderLog(host, commits) {
+  host.innerHTML = '';
+  if (!commits || !commits.length) { host.innerHTML = '<div class="gp-hint">还没有提交记录</div>'; return; }
+  commits.forEach((c) => {
+    const item = document.createElement('div'); item.className = 'gp-item';
+    const head = document.createElement('button'); head.type = 'button'; head.className = 'gp-item-head';
+    const msg = document.createElement('span'); msg.className = 'gp-item-msg';
+    msg.textContent = (c.message || '').trim() || '（无提交信息）';
+    const meta = document.createElement('span'); meta.className = 'gp-item-meta';
+    meta.textContent = _gpFmtTime(c.date) + ' · ' + (c.author || '') + ' · ' + String(c.oid || '').slice(0, 8);
+    head.appendChild(msg); head.appendChild(meta);
+    const detail = document.createElement('div'); detail.className = 'gp-item-detail hidden';
+    head.addEventListener('click', () => {
+      const willOpen = detail.classList.contains('hidden');
+      host.querySelectorAll('.gp-item-detail').forEach((d) => d.classList.add('hidden'));
+      host.querySelectorAll('.gp-item-head').forEach((h) => h.classList.remove('active'));
+      if (!willOpen) return;
+      detail.classList.remove('hidden'); head.classList.add('active');
+      _gpLoadDetail(detail, c.oid);
+    });
+    item.appendChild(head); item.appendChild(detail);
+    host.appendChild(item);
+  });
+}
+async function _gpLoadDetail(host, oid) {
+  host.innerHTML = '<div class="gp-hint">读取改动…</div>';
+  try {
+    const d = await window.gitSync.commitDetail(oid);
+    const rows = [];
+    (d.changed || []).forEach((p) => rows.push('<div class="gp-file add"><i>+</i>' + escapeHtml(p) + '</div>'));
+    (d.removed || []).forEach((p) => rows.push('<div class="gp-file del"><i>−</i>' + escapeHtml(p) + '</div>'));
+    host.innerHTML = rows.length ? rows.join('') : '<div class="gp-hint">这次提交没有文件改动</div>';
+  } catch (e) {
+    host.innerHTML = '<div class="gp-hint">读取失败：' + escapeHtml(_gpErr(e && e.message || e)) + '</div>';
+  }
+}
+
+async function refreshGitPanel() {
+  if (!_gitPanelOpen()) return;
+  const gs = window.gitSync;
+  const stEl = document.getElementById('gp-status');
+  const logEl = document.getElementById('gp-log');
+  if (!gs || !stEl || !logEl) return;
+  try { stEl.innerHTML = _gpStatusHtml(await gs.getStatus()); }
+  catch (e) { stEl.innerHTML = '<div class="gp-hint">状态读取失败：' + escapeHtml(_gpErr(e && e.message || e)) + '</div>'; }
+  const seq = ++_gpLogSeq;
+  try {
+    const commits = await gs.listCommits({ depth: 40 });
+    if (seq !== _gpLogSeq) return;
+    _gpRenderLog(logEl, commits);
+  } catch (e) {
+    logEl.innerHTML = '<div class="gp-hint">提交记录读取失败：' + escapeHtml(_gpErr(e && e.message || e)) + '</div>';
+  }
+}
+window.refreshGitPanel = refreshGitPanel;
+
+function _gpSetBusy(b) {
+  ['gp-btn-pull', 'gp-btn-push', 'gp-btn-sync', 'gp-btn-refresh'].forEach((id) => {
+    const el = document.getElementById(id); if (el) el.disabled = b;
+  });
+}
+async function _gpRun(kind) {
+  const gs = window.gitSync;
+  if (!gs) { toast('Git 同步未就绪', 'warning'); return; }
+  if (_gpBusy || gs.isSyncing()) { toast('正在同步…', 'info'); return; }
+  _gpBusy = true; _gpSetBusy(true);
+  const label = kind === 'pull' ? '拉取' : (kind === 'push' ? '推送' : '同步');
+  try {
+    try { editor.flushSave?.(); } catch (_) {}
+    const r = kind === 'pull' ? await gs.pull() : (kind === 'push' ? await gs.push() : await gs.manualSync());
+    if (r && r.skipped) toast('正在同步…', 'info');
+    else if (r && r.ok === false) toast(label + '失败：' + _gpErr(r.error), 'error', { duration: 8000 });
+    else if (kind === 'pull') toast(r && r.downloaded ? '已拉取，应用 ' + r.downloaded + ' 项远端变更' : '已拉取，远端没有新内容', 'success');
+    else if (kind === 'push') toast(r && r.nothingToPush ? '远端已是最新，无需推送' : '已推送到远端', 'success');
+    else toast('同步完成', 'success');
+    try { _refreshSyncDot(); } catch (_) {}
+  } catch (e) {
+    toast(label + '失败：' + _gpErr(e && e.message || e), 'error', { duration: 8000 });
+  } finally {
+    _gpBusy = false; _gpSetBusy(false);
+    refreshGitPanel();
+  }
+}
+
+function _bindGitPanel() {
+  document.getElementById('btn-git-panel')?.addEventListener('click', toggleGitPanel);
+  document.getElementById('gp-btn-close')?.addEventListener('click', () => _setGitPanelOpen(false));
+  document.getElementById('gp-btn-refresh')?.addEventListener('click', () => refreshGitPanel());
+  document.getElementById('gp-btn-settings')?.addEventListener('click', () => openSettingsModal('sync'));
+  document.getElementById('gp-btn-pull')?.addEventListener('click', () => _gpRun('pull'));
+  document.getElementById('gp-btn-push')?.addEventListener('click', () => _gpRun('push'));
+  document.getElementById('gp-btn-sync')?.addEventListener('click', () => _gpRun('sync'));
+  document.getElementById('git-panel-backdrop')?.addEventListener('click', () => _setGitPanelOpen(false));
+  // 后台自动同步 / 顶栏立即同步结束后，面板若开着就自动刷新状态与提交记录
+  try {
+    storage.on('cloud-sync', (p) => {
+      const t = p && p.type;
+      if (/^(webdav|git)-sync-(ok|fail)$/.test(t) && _gitPanelOpen()) refreshGitPanel();
+    });
+  } catch (_) {}
+  // 恢复上次的开合状态（仅 Git 模式）
+  requestAnimationFrame(() => {
+    try {
+      if (localStorage.getItem(GP_OPEN_KEY) === '1' &&
+          (storage.getSetting('syncMethod') || 'none') === 'git' && window.gitSync) {
+        _setGitPanelOpen(true, false);
+      }
+    } catch (_) {}
+  });
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _bindGitPanel);
+else _bindGitPanel();
+
+
 /** 云同步徽标：显示在 btn-cloud-sync 右上角 */
 let _lastSyncTime = null;
 let _lastSyncDetail = '';        // 上次传/收篇数（如「 · 传 2 篇，收 1 篇」），只进 tooltip，不占界面
@@ -4794,6 +4979,11 @@ function openCloudSyncMenu(anchor) {
 
   if (method === 'git') {
     popup.innerHTML = `
+      <div class="context-menu-item" data-act="git-panel">
+        <span style="width:14px;color:var(--accent);">⑂</span>
+        <span>打开 Git 面板</span>
+      </div>
+      <div class="context-menu-divider"></div>
       <div class="context-menu-item" data-act="sync">
         <span style="width:14px;color:var(--accent);">⟳</span>
         <span>立即同步</span>
@@ -4853,7 +5043,9 @@ function openCloudSyncMenu(anchor) {
     it.addEventListener('click', async () => {
       const act = it.dataset.act;
       close();
-      if (act === 'sync') {
+      if (act === 'git-panel') {
+        _setGitPanelOpen(true);
+      } else if (act === 'sync') {
         await smartCloudSync();
       } else if (act === 'repair-manifest') {
         await runRepairManifestFlow();
@@ -4915,14 +5107,23 @@ function _webAppUrl() {
  * 给人看的号 = window.__MD_VER__（打包注入）。网页端 whats-new.json 的 id/ver 打包时写成同一串。
  * 版本已读、勿扰、跟这台走的勾删只写本机；跟笔记走的勾删进 settings.bellMsgAcks 随账号。 */
 const WHATS_NEW = {
-  id: window.__MD_VER__ || '20261112t1',
-  date: '2026-11-12',
+  id: window.__MD_VER__ || '20261115t1',
+  date: '2026-11-15',
   items: [
-    { title: 'Git 仓库同步', text: '新增自建 Git 仓库同步后端，笔记以 Markdown 明文存入仓库，完整保留每次提交的版本历史。' },
-    { title: '笔记版本历史', text: 'Git 同步下可查看单篇笔记的历次提交、预览任意时点内容，并一键还原。' },
-    { title: '自动同步与冲突留底', text: '切换仓库后自动按周期拉取、合并并推送；遇到冲突时保留双方版本到 conflicts/ 目录。' },
+    { title: 'Git 同步面板', text: '新增右侧 Git 面板，集中查看仓库状态与提交记录，随手拉取、推送，不用再到处找入口。' },
+    { title: '主动拉取 / 推送', text: '拉取与推送拆成独立按钮。拉取会先保存本地改动再合并远端，绝不覆盖未保存的编辑；推送遇到远端有更新时提示先拉取，绝不强制覆盖。' },
+    { title: '提交记录与分支状态', text: '可查看整仓提交历史与每次改动的文件，面板显示当前分支、HEAD、领先/落后条数及上次同步时间。' },
   ],
   history: [
+    {
+      ver: 'v2.2.2',
+      date: '2026-11-12',
+      items: [
+        { title: 'Git 仓库同步', text: '新增自建 Git 仓库同步后端，笔记以 Markdown 明文存入仓库，完整保留每次提交的版本历史。' },
+        { title: '笔记版本历史', text: 'Git 同步下可查看单篇笔记的历次提交、预览任意时点内容，并一键还原。' },
+        { title: '自动同步与冲突留底', text: '切换仓库后自动按周期拉取、合并并推送；遇到冲突时保留双方版本到 conflicts/ 目录。' },
+      ],
+    },
     {
       ver: 'v2.0.4',
       date: '2026-08-21',

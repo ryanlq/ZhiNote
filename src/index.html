@@ -152,6 +152,9 @@
           <button id="btn-history" class="icon-btn hidden" title="版本历史（Git 同步）">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg>
           </button>
+          <button id="btn-git-panel" class="icon-btn hidden" title="Git 同步面板（拉取 / 推送 / 提交记录）">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5" r="2.3"/><circle cx="6" cy="19" r="2.3"/><circle cx="18" cy="7" r="2.3"/><path d="M6 7.3v9.4"/><path d="M18 9.3v1.2a4 4 0 0 1-4 4H10"/></svg>
+          </button>
           <button id="btn-cloud-sync" class="icon-btn" title="云同步">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19a4.5 4.5 0 1 0 0-9h-1.27A8 8 0 1 0 3 16.3"/><polyline points="8 17 12 21 16 17"/><line x1="12" y1="12" x2="12" y2="21"/></svg>
             <span id="cloud-sync-dot" class="cloud-badge"></span>
@@ -304,6 +307,29 @@
         </div>
       </div>
     </main>
+
+    <aside id="git-panel" class="hidden">
+      <div class="gp-header">
+        <span class="gp-title">Git 同步</span>
+        <div class="gp-header-acts">
+          <button id="gp-btn-refresh" class="gp-hbtn" title="刷新状态与提交记录">⟳</button>
+          <button id="gp-btn-settings" class="gp-hbtn" title="打开云同步设置">⚙</button>
+          <button id="gp-btn-close" class="gp-hbtn" title="关闭面板">✕</button>
+        </div>
+      </div>
+      <div id="gp-status" class="gp-status"></div>
+      <div class="gp-actions">
+        <button id="gp-btn-pull" class="gp-btn" title="取回远端改动并合并到本地，不上传">↓ 拉取</button>
+        <button id="gp-btn-push" class="gp-btn gp-btn-primary" title="上传本地提交到远端，分叉时拒绝强推">↑ 推送</button>
+      </div>
+      <div class="gp-log-head">
+        <span>提交记录</span>
+        <button id="gp-btn-sync" class="gp-link" title="完整同步：拉取 + 合并 + 推送（等同顶栏立即同步）">立即同步</button>
+      </div>
+      <div id="gp-log" class="gp-log"></div>
+      <div class="gp-foot">分支状态基于上次同步；「拉取」会先保存本地改动，绝不覆盖未保存的编辑。</div>
+    </aside>
+    <div id="git-panel-backdrop" class="hidden"></div>
   </div>
 
   <div id="context-menu" class="context-menu hidden"></div>
@@ -361,7 +387,7 @@
   <link rel="stylesheet" href="katex.min.css">
   <script defer src="katex.min.js"></script>
   <script>
-    window.__MD_VER__ = '20261112t1';
+    window.__MD_VER__ = '20261115t1';
     // 小枝第一套：Cloudflare 代取（见 docs/emoji-proxy-worker.js）；失败自动回退谷歌
     window.__NOTO_EMO_HOST__ = 'https://emoji.zhinote.net';
   </script>
