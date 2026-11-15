@@ -4488,6 +4488,10 @@ function _zhSyncError(err) {
   if (/[\u4e00-\u9fa5]/.test(s)) return s;
   const low = s.toLowerCase();
   if (low.includes('aborted') || low.includes('aborterror')) return '连接超时或被中断，请重试';
+  // 分叉/非快进：明说点一下「拉取」就好，绝不强制覆盖（英文兜底，中文提示已在同步层给过）
+  if (/reject|non-fast-forward|fast-forward|fetch first|force:\s*true|simple fast/i.test(low)) {
+    return '远端刚有了新提交，和本地撞车了：点一下「拉取」合并后再推就好（不会强制覆盖远端，也不丢任何一边的笔记）';
+  }
   if (low.includes('failed to fetch') || low.includes('load failed') || low.includes('networkerror') || low.includes('network error')) {
     // 网页端经代理时，fetch 直接失败多半是代理不可达（断网/被拦截/代理域名没绑好）
     const viaProxy = !(window.host && window.host.isQuicker()) && window.webdavSync?.resolveProxy?.(storage.getSetting('webdavProxy')) !== '';
@@ -4780,6 +4784,96 @@ async function _gpLoadDetail(host, oid) {
   }
 }
 
+// ---- 冲突留底 ----
+function _gpConflictTime(s) {
+  s = String(s || '');
+  const m = /^(\d{4}-\d{2}-\d{2})T?[\s-]?(\d{2})[-:]?(\d{2})?/.exec(s);
+  return m ? m[1] + (m[2] ? ' ' + m[2] + (m[3] ? ':' + m[3] : '') : '') : s;
+}
+function _gpRenderConflicts(host, list) {
+  host.innerHTML = '';
+  list.forEach((c) => {
+    const item = document.createElement('div'); item.className = 'gp-conf-item';
+    const line = document.createElement('div'); line.className = 'gp-conf-line';
+    const info = document.createElement('div'); info.className = 'gp-conf-info';
+    const name = document.createElement('div'); name.className = 'gp-conf-name';
+    name.textContent = c.title || c.orig || c.name;
+    const meta = document.createElement('div'); meta.className = 'gp-conf-meta';
+    meta.textContent = (c.orig || c.name) + ' · ' + _gpConflictTime(c.saved);
+    meta.title = c.path;
+    info.appendChild(name); info.appendChild(meta);
+    const acts = document.createElement('div'); acts.className = 'gp-conf-acts';
+    function mkBtn(label, cls, fn) {
+      const b = document.createElement('button'); b.type = 'button'; b.className = 'gp-link' + (cls ? ' ' + cls : '');
+      b.textContent = label; b.addEventListener('click', fn); return b;
+    }
+    acts.appendChild(mkBtn('预览', '', () => _gpConflictPreview(c.path)));
+    const apply = mkBtn('用这版覆盖', '', () => _gpConflictApply(c.path));
+    if (!c.canApply) { apply.disabled = true; apply.title = '这份留底不是笔记内容，请预览后手动复制'; }
+    acts.appendChild(apply);
+    acts.appendChild(mkBtn('忽略', 'danger', () => _gpConflictIgnore(c.path)));
+    line.appendChild(info); line.appendChild(acts);
+    item.appendChild(line);
+    host.appendChild(item);
+  });
+}
+async function _gpConflictPreview(path) {
+  try {
+    const v = await window.gitSync.readConflict(path);
+    const wrap = document.createElement('div'); wrap.className = 'gp-conf-preview';
+    const meta = document.createElement('div'); meta.className = 'gp-conf-preview-meta';
+    meta.textContent = (v.orig || path) + ' · 留底于 ' + _gpConflictTime(v.saved);
+    const body = document.createElement('div'); body.className = 'gp-conf-preview-body ProseMirror';
+    if (window.editor && window.editor.renderMdPreviewHtml) {
+      body.innerHTML = window.editor.renderMdPreviewHtml(v.body || '');
+    } else {
+      body.textContent = v.body || '（空内容）';
+    }
+    wrap.appendChild(meta); wrap.appendChild(body);
+    openModal({ title: '冲突留底 · 远端那版', body: wrap, dialogClass: 'git-history-modal' });
+  } catch (e) {
+    toast('读取留底失败：' + _gpErr(e && e.message || e), 'error');
+  }
+}
+async function _gpConflictApply(path) {
+  const ok = await uiConfirm({
+    title: '用远端版本覆盖本地',
+    message: '将用这份留底里的远端版本覆盖本地同名笔记。\n\n本地当前内容会被替换（仍可在笔记的版本历史里找回），改动会在下次同步推上去。\n\n确定继续吗？',
+    okText: '覆盖本地', okClass: 'primary-btn',
+  });
+  if (!ok) return;
+  try {
+    try { editor.flushSave?.(); } catch (_) {}
+    const r = await window.gitSync.applyConflict(path);
+    toast('已用远端版本覆盖「' + (r.title || '') + '」，将在下次同步推上去', 'success');
+    try { editor.reloadCurrent?.(); } catch (_) {}
+    refreshGitPanel();
+  } catch (e) {
+    toast('覆盖失败：' + _gpErr(e && e.message || e), 'error');
+  }
+}
+async function _gpConflictIgnore(path) {
+  try {
+    await window.gitSync.ignoreConflict(path);
+    toast('已忽略这条留底', 'success');
+    refreshGitPanel();
+  } catch (e) {
+    toast('操作失败：' + _gpErr(e && e.message || e), 'error');
+  }
+}
+async function _gpRefreshConflicts() {
+  const box = document.getElementById('gp-conflicts');
+  const host = document.getElementById('gp-conflicts-list');
+  const cnt = document.getElementById('gp-conflicts-count');
+  if (!box || !host || !window.gitSync || typeof window.gitSync.listConflicts !== 'function') return;
+  let list = [];
+  try { list = await window.gitSync.listConflicts(); } catch (_) {}
+  if (!list.length) { box.classList.add('hidden'); return; }
+  box.classList.remove('hidden');
+  if (cnt) cnt.textContent = String(list.length);
+  _gpRenderConflicts(host, list);
+}
+
 async function refreshGitPanel() {
   if (!_gitPanelOpen()) return;
   const gs = window.gitSync;
@@ -4788,6 +4882,7 @@ async function refreshGitPanel() {
   if (!gs || !stEl || !logEl) return;
   try { stEl.innerHTML = _gpStatusHtml(await gs.getStatus()); }
   catch (e) { stEl.innerHTML = '<div class="gp-hint">状态读取失败：' + escapeHtml(_gpErr(e && e.message || e)) + '</div>'; }
+  _gpRefreshConflicts();
   const seq = ++_gpLogSeq;
   try {
     const commits = await gs.listCommits({ depth: 40 });
@@ -5107,14 +5202,23 @@ function _webAppUrl() {
  * 给人看的号 = window.__MD_VER__（打包注入）。网页端 whats-new.json 的 id/ver 打包时写成同一串。
  * 版本已读、勿扰、跟这台走的勾删只写本机；跟笔记走的勾删进 settings.bellMsgAcks 随账号。 */
 const WHATS_NEW = {
-  id: window.__MD_VER__ || '20261115t2',
+  id: window.__MD_VER__ || '20261115t3',
   date: '2026-11-15',
   items: [
-    { title: '测试连接不再误报', text: '修复 Git 面板「测试连接」：密码框出于安全不回填，此前留空会用空密码去连，误报 401。现在留空自动沿用已保存的密码。' },
-    { title: '保存不再冲掉密码', text: '改分支或提交署名后保存，不会再因密码框为空而把已保存的密码清空，导致自动同步跟着失败。' },
-    { title: '卡住时有明确提示', text: '测试连接加了 15 秒超时：服务器无响应时明确报错，不再一直停在「正在连接」。' },
+    { title: '多端同时同步不再报错', text: '两台设备几乎同时推送时，偶尔会撞上「推送被拒绝」。现在会自动重新拉取、合并再推一次，绝大多数情况你根本不用管，也不会看见报错。' },
+    { title: '分叉提示说人话', text: '真遇到分叉需要你动手时，不再甩一句英文，直接中文告诉你「点一下拉取就好」，绝不强制覆盖，也不丢任何一边的笔记。' },
+    { title: '冲突留底可查可处理', text: 'Git 面板新增「冲突留底」：同一篇笔记被两端都改过时，可列出、预览没被采用的远端版本，用它覆盖本地或忽略。' },
   ],
   history: [
+    {
+      ver: 'v2.2.4',
+      date: '2026-11-15',
+      items: [
+        { title: '测试连接不再误报', text: '修复 Git 面板「测试连接」：密码框出于安全不回填，此前留空会用空密码去连，误报 401。现在留空自动沿用已保存的密码。' },
+        { title: '保存不再冲掉密码', text: '改分支或提交署名后保存，不会再因密码框为空而把已保存的密码清空，导致自动同步跟着失败。' },
+        { title: '卡住时有明确提示', text: '测试连接加了 15 秒超时：服务器无响应时明确报错，不再一直停在「正在连接」。' },
+      ],
+    },
     {
       ver: 'v2.2.3',
       date: '2026-11-15',

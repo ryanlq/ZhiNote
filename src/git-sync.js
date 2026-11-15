@@ -124,6 +124,13 @@
     await pfs().writeFile(full, content);
     _exported[path] = hashStr(content);
   }
+  // 只写工作区、不登记 _exported：用于 conflicts/ 留底这类「本地未跟踪文件」。
+  // 不进导出表 → 不会被 _exportAll 当消失的文件清掉，也不会被 _commitAll 提交进仓库。
+  async function wfWriteLocal(path, content) {
+    const full = DIR + '/' + path;
+    await _mkdirp(full.slice(0, full.lastIndexOf('/')));
+    await pfs().writeFile(full, content);
+  }
   async function wfWriteBin(path, bytes) {
     const full = DIR + '/' + path;
     await _mkdirp(full.slice(0, full.lastIndexOf('/')));
@@ -536,18 +543,115 @@
       if (o === t) continue;                                   // 两边一致
       if (t === b) continue;                                   // 只有本地变 → 保留本地
       if (o === b || o == null) { await wfWrite(p, t); continue; } // 只有远端变 / 本地新增缺失 → 取远端
-      // 双方都变：本地为准，远端留底
+      // 双方都变：本地为准，远端留底（纯本地未跟踪文件，不进仓库/导出表）
       const conflictPath = 'conflicts/' + p.replace(/\//g, '-') + '-' + ts + '.md';
-      await wfWrite(conflictPath, t);
+      // 头部几行注释记录原始路径/时间，供面板展示；正文是远端那版完整内容
+      const header = '<!-- zhinote-conflict\npath: ' + p + '\nsaved: ' + ts + '\n-->\n';
+      await wfWriteLocal(conflictPath, header + t);
       saved++;
     }
     if (saved) {
-      log('合并冲突：' + saved + ' 个远端版本留底 conflicts/');
-      try { window.toast ? window.toast('Git 合并有冲突：' + saved + ' 个远端版本已留底 conflicts/ 目录', 'warn', { duration: 8000 }) : null; } catch (_) {}
+      log('合并冲突：' + saved + ' 个远端版本留底 conflicts/（可在 Git 面板查看）');
+      try { window.toast ? window.toast('Git 合并有冲突：' + saved + ' 个远端版本已留底，可在 Git 面板「冲突留底」查看或处理', 'warn', { duration: 8000 }) : null; } catch (_) {}
     }
   }
 
   // ---- 同步周期 ----
+  // 单轮完整同步：导出→commit→fetch→merge→应用→push。失败直接抛，由 syncCycle 统一处理/重试。
+  async function _syncOnceRaw(kind, opts, skipPush, skipMerge) {
+    let pushed = false, applied = new Set(), exported = 0;
+    await _ensureRepo();
+    const c = cfg();
+
+    // 首同步：采纳远端（可解析）或接管异仓（以本机为准）
+    if (_justCloned) {
+      _justCloned = false;
+      if (_hasRemoteNotes) {
+        const head = await git.resolveRef({ fs: _fs, dir: DIR, ref: 'HEAD' });
+        applied = await _applyRemote(null, head);
+      } else {
+        await _wipeForeignFiles();
+        _hasRemoteNotes = true;
+      }
+    }
+
+    // 1) 导出本地变更 → 提交（本地先落库，pull/merge 时工作区干净）
+    const ex = await _exportAll();
+    _saveExported();
+    exported = ex.changed;
+    const localHead0 = await git.resolveRef({ fs: _fs, dir: DIR, ref: 'HEAD' }).catch(() => null);
+    let localHead = localHead0;
+    if (ex.changed > 0 || ex.images > 0 || localHead === null) {
+      const sha = await _commitAll('zhinote: 同步（' + ex.changed + ' 项变更）');
+      localHead = await git.resolveRef({ fs: _fs, dir: DIR, ref: 'HEAD' });
+      pushed = true;
+      log('committed ' + String(sha).slice(0, 8));
+    }
+
+    // 2) 拉远端
+    const remoteOld = await git.resolveRef({ fs: _fs, dir: DIR, ref: 'refs/remotes/origin/' + c.branch }).catch(() => null);
+    await git.fetch({ fs: _fs, http: window.gitHttp, dir: DIR, url: c.url, branch: c.branch, onAuth: onAuth });
+    const remoteNew = await git.resolveRef({ fs: _fs, dir: DIR, ref: 'refs/remotes/origin/' + c.branch }).catch(() => null);
+
+    // ---- push 模式：不合并、不应用远端；推送前先判分叉，绝不 force ----
+    if (skipMerge) {
+      // push 不带 force（_push 默认），isomorphic-git 遇非快进本就会拒绝；这里只做「提前友好提示」。
+      if (remoteNew && localHead && remoteNew !== localHead) {
+        try {
+          const bases = await git.findMergeBase({ fs: _fs, dir: DIR, oids: [localHead, remoteNew] });
+          const base = bases && bases[0];
+          // 远端 HEAD 不是本地 HEAD 的祖先 → 远端另有提交 → 提前拒绝，给出可操作的提示
+          if (base && base !== remoteNew) {
+            throw new Error('远端有本地没有的提交，请先「拉取」合并后再推送（不会强制覆盖远端）');
+          }
+        } catch (e) {
+          if (e && /请先/.test(e.message)) throw e;   // 上面主动抛的中文提示，原样透出
+          /* 其余（API 不可用等）交给 _push 的非快进拒绝兜底，catch 里翻译成中文 */
+        }
+      }
+    } else if (remoteNew && remoteNew !== localHead) {
+      // 3) 远端有新内容 → 快进 / merge commit / 冲突按文件 keep-both
+      let merged = false;
+      try {
+        await git.merge({ fs: _fs, http: window.gitHttp, dir: DIR, theirs: 'refs/remotes/origin/' + c.branch, fastForwardOnly: true });
+        merged = true;
+      } catch (e1) {
+        if (remoteOld && localHead !== remoteOld) {
+          // 真分叉：本地与远端各有提交 → merge commit
+          try {
+            await git.merge({ fs: _fs, http: window.gitHttp, dir: DIR, theirs: 'refs/remotes/origin/' + c.branch, message: 'zhinote: 合并远端变更', author: author() });
+            merged = true;
+          } catch (e2) { await _resolvePerFileKeepBoth(localHead, remoteNew, remoteOld); merged = true; }
+        } else {
+          await _resolvePerFileKeepBoth(localHead, remoteNew, null);  // 冲突标记等异常情况
+          merged = true;
+        }
+      }
+      if (merged) pushed = true;
+      // 4) 应用远端增量（remoteOld → remoteNew = 纯远端贡献）
+      if (remoteOld !== remoteNew) applied = await _applyRemote(remoteOld, remoteNew);
+    }
+
+    // 5) 推送（完整同步 / push 模式）；pull 模式跳过
+    let doPush = false;
+    if (!skipPush) doPush = pushed || (skipMerge && !!localHead);
+    if (doPush) await _push();
+    _saveExported();
+
+    const detail = skipMerge ? 'push' : (skipPush ? 'pull' : (kind === 'put' ? 'put' : 'get'));
+    emitOk(detail, { uploaded: exported, downloadedNoteIds: applied }, opts.silent);
+    try { if (_bc && kind !== 'wake') _bc.postMessage('synced'); } catch (_) {}
+    _hasRemoteNotes = true;
+    return {
+      ok: true, mode: skipMerge ? 'push' : (skipPush ? 'pull' : 'sync'),
+      pushed: doPush, uploaded: exported, downloaded: applied.size,
+      nothingToPush: !!(skipMerge && !pushed && remoteNew === localHead),
+    };
+  }
+
+  const NON_FF_RE = /reject|non-fast-forward|fetch first|not a fast|not a simple fast|fetch.*first|failed to push|cannot push/i;
+  const NON_FF_MSG = '远端刚有了新提交，和本地撞车了：点一下「拉取」合并后再推就好（不会强制覆盖远端，也不丢任何一边的笔记）';
+
   async function syncCycle(kind, opts) {
     opts = opts || {};
     const skipPush = !!opts.skipPush;   // pull：只拉不推
@@ -556,104 +660,30 @@
     if (!_lock()) { log('他标签正在同步，跳过本轮'); return { ok: false, skipped: true }; }
     _syncing = true; _uiBusy++;
     emitStart(kind, opts.silent);
-    let pushed = false, applied = new Set(), exported = 0;
+    // 竞态自愈：完整同步（既拉又推）撞「非快进」时，说明 fetch 后、push 前另一台设备抢先推了一笔。
+    // 静默重跑一轮 fetch+merge+push 即可自愈；只重试一次，且推送/拉取单按钮不参与，避免死循环。
+    const canRetry = !skipMerge && !skipPush;
     try {
-      await _ensureRepo();
-      const c = cfg();
-
-      // 首同步：采纳远端（可解析）或接管异仓（以本机为准）
-      if (_justCloned) {
-        _justCloned = false;
-        if (_hasRemoteNotes) {
-          const head = await git.resolveRef({ fs: _fs, dir: DIR, ref: 'HEAD' });
-          applied = await _applyRemote(null, head);
-        } else {
-          await _wipeForeignFiles();
-          _hasRemoteNotes = true;
-        }
-      }
-
-      // 1) 导出本地变更 → 提交（本地先落库，pull/merge 时工作区干净）
-      const ex = await _exportAll();
-      _saveExported();
-      exported = ex.changed;
-      const localHead0 = await git.resolveRef({ fs: _fs, dir: DIR, ref: 'HEAD' }).catch(() => null);
-      let localHead = localHead0;
-      if (ex.changed > 0 || ex.images > 0 || localHead === null) {
-        const sha = await _commitAll('zhinote: 同步（' + ex.changed + ' 项变更）');
-        localHead = await git.resolveRef({ fs: _fs, dir: DIR, ref: 'HEAD' });
-        pushed = true;
-        log('committed ' + String(sha).slice(0, 8));
-      }
-
-      // 2) 拉远端
-      const remoteOld = await git.resolveRef({ fs: _fs, dir: DIR, ref: 'refs/remotes/origin/' + c.branch }).catch(() => null);
-      await git.fetch({ fs: _fs, http: window.gitHttp, dir: DIR, url: c.url, branch: c.branch, onAuth: onAuth });
-      const remoteNew = await git.resolveRef({ fs: _fs, dir: DIR, ref: 'refs/remotes/origin/' + c.branch }).catch(() => null);
-
-      // ---- push 模式：不合并、不应用远端；推送前先判分叉，绝不 force ----
-      if (skipMerge) {
-        // push 不带 force（_push 默认），isomorphic-git 遇非快进本就会拒绝；这里只做「提前友好提示」。
-        if (remoteNew && localHead && remoteNew !== localHead) {
-          try {
-            const bases = await git.findMergeBase({ fs: _fs, dir: DIR, oids: [localHead, remoteNew] });
-            const base = bases && bases[0];
-            // 远端 HEAD 不是本地 HEAD 的祖先 → 远端另有提交 → 提前拒绝，给出可操作的提示
-            if (base && base !== remoteNew) {
-              throw new Error('远端有本地没有的提交，请先「拉取」合并后再推送（不会强制覆盖远端）');
-            }
-          } catch (e) {
-            if (e && /请先/.test(e.message)) throw e;   // 上面主动抛的中文提示，原样透出
-            /* 其余（API 不可用等）交给 _push 的非快进拒绝兜底，catch 里翻译成中文 */
-          }
-        }
-      } else if (remoteNew && remoteNew !== localHead) {
-        // 3) 远端有新内容 → 快进 / merge commit / 冲突按文件 keep-both
-        let merged = false;
+      let lastErr = null;
+      for (let attempt = 0, max = canRetry ? 2 : 1; attempt < max; attempt++) {
         try {
-          await git.merge({ fs: _fs, http: window.gitHttp, dir: DIR, theirs: 'refs/remotes/origin/' + c.branch, fastForwardOnly: true });
-          merged = true;
-        } catch (e1) {
-          if (remoteOld && localHead !== remoteOld) {
-            // 真分叉：本地与远端各有提交 → merge commit
-            try {
-              await git.merge({ fs: _fs, http: window.gitHttp, dir: DIR, theirs: 'refs/remotes/origin/' + c.branch, message: 'zhinote: 合并远端变更', author: author() });
-              merged = true;
-            } catch (e2) { await _resolvePerFileKeepBoth(localHead, remoteNew, remoteOld); merged = true; }
-          } else {
-            await _resolvePerFileKeepBoth(localHead, remoteNew, null);  // 冲突标记等异常情况
-            merged = true;
+          return await _syncOnceRaw(kind, opts, skipPush, skipMerge);
+        } catch (e) {
+          lastErr = e;
+          const m = String((e && (e.message || e.code)) || e);
+          if (canRetry && attempt === 0 && NON_FF_RE.test(m)) {
+            log('推送撞非快进（竞态），自动重跑一轮 fetch+merge+push');
+            continue;
           }
+          throw e;
         }
-        if (merged) pushed = true;
-        // 4) 应用远端增量（remoteOld → remoteNew = 纯远端贡献）
-        if (remoteOld !== remoteNew) applied = await _applyRemote(remoteOld, remoteNew);
       }
-
-      // 5) 推送（完整同步 / push 模式）；pull 模式跳过
-      let doPush = false;
-      if (!skipPush) doPush = pushed || (skipMerge && !!localHead);
-      if (doPush) await _push();
-      _saveExported();
-
-      const detail = skipMerge ? 'push' : (skipPush ? 'pull' : (kind === 'put' ? 'put' : 'get'));
-      emitOk(detail, { uploaded: exported, downloadedNoteIds: applied }, opts.silent);
-      try { if (_bc && kind !== 'wake') _bc.postMessage('synced'); } catch (_) {}
-      _hasRemoteNotes = true;
-      return {
-        ok: true, mode: skipMerge ? 'push' : (skipPush ? 'pull' : 'sync'),
-        pushed: doPush, uploaded: exported, downloaded: applied.size,
-        nothingToPush: !!(skipMerge && !pushed && remoteNew === localHead),
-      };
+      throw lastErr;
     } catch (e) {
       log('同步失败：' + (e && (e.stack || e.message || e.code) || e));
-      let err = e;
-      if (skipMerge) {
-        const m = String((e && (e.message || e.code)) || e);
-        if (/reject|non-fast-forward|fetch first|not a fast|fetch.*first|failed to push|cannot push/i.test(m)) {
-          err = new Error('远端有本地没有的提交，推送被拒绝。请先「拉取」合并后再推送（不会强制覆盖远端）');
-        }
-      }
+      // 非快进统一翻成中文（自动同步 / 立即同步 / 推送所有路径都覆盖），明说「点一下拉取就好」
+      const m = String((e && (e.message || e.code)) || e);
+      const err = NON_FF_RE.test(m) ? new Error(NON_FF_MSG) : e;
       emitFail(err, opts.silent);
       return { ok: false, error: String((err && err.message) || err) };
     } finally {
@@ -831,6 +861,109 @@
     } catch (_) { return { changed: [], removed: [] }; }
   }
 
+  // ---- 阶段4：冲突留底（列出 / 预览 / 用远端版覆盖本地 / 忽略）----
+  // 留底是「纯本地未跟踪文件」：不进 _exported、不进仓库，_exportAll 不会清它、_commitAll 不会提交它。
+  const CONFLICT_DIR = 'conflicts/';
+  function _conflictSafePath(p) {
+    return typeof p === 'string' && /^conflicts\/[^/]+\.md$/.test(p);
+  }
+  function _parseConflict(raw) {
+    let body = raw, orig = '', saved = '';
+    const m = /^<!-- zhinote-conflict\s*\n([\s\S]*?)-->\n/.exec(raw);
+    if (m) {
+      const kv = m[1];
+      const p = /^path:\s*(.+)$/m.exec(kv); if (p) orig = p[1].trim();
+      const s = /^saved:\s*(.+)$/m.exec(kv); if (s) saved = s[1].trim();
+      body = raw.slice(m[0].length);
+    }
+    const parsed = _fmParse(body);
+    return {
+      orig: orig, saved: saved, raw: body,
+      fm: parsed ? parsed.fm : {},
+      body: parsed ? parsed.body : body,
+      title: parsed ? String(parsed.fm.title || '') : '',
+      id: parsed ? String(parsed.fm.id || '') : '',
+      parseable: !!parsed,
+    };
+  }
+  /** 列出全部冲突留底（本地读取，不联网）。 */
+  async function listConflicts() {
+    if (!(await _localReady())) return [];
+    let names = [];
+    try { names = await pfs().readdir(DIR + '/' + CONFLICT_DIR); } catch (_) { return []; }
+    const out = [];
+    for (const name of names) {
+      if (name.indexOf('/') >= 0 || name.indexOf('\\') >= 0 || name.indexOf('..') >= 0 || !/\.md$/.test(name)) continue;
+      let raw;
+      try { raw = await wfRead(CONFLICT_DIR + name); } catch (_) { continue; }
+      if (raw == null) continue;
+      const c = _parseConflict(raw);
+      let orig = c.orig;
+      if (!orig) { // 兼容无头部注释的旧留底：从文件名粗还原
+        const mm = /^(.+)-\d{4}-\d{2}-\d{2}T?[\d-]*\.md$/.exec(name);
+        orig = mm ? mm[1].replace(/-/g, '/') : name;
+      }
+      out.push({
+        path: CONFLICT_DIR + name, name: name, orig: orig,
+        saved: c.saved || name, title: c.title || c.id || orig,
+        id: c.id, parseable: c.parseable,
+        preview: c.body.slice(0, 240), size: c.raw.length,
+        canApply: /^notes\//.test(orig) && c.parseable,
+      });
+    }
+    out.sort((a, b) => String(b.saved).localeCompare(String(a.saved)));
+    return out;
+  }
+  /** 读单条留底详情（供预览）。 */
+  async function readConflict(path) {
+    if (!_conflictSafePath(path)) throw new Error('非法的留底路径');
+    if (!(await _localReady())) throw new Error('本地仓库还没就绪');
+    const raw = await wfRead(path);
+    if (raw == null) throw new Error('留底文件不存在或已被处理');
+    const c = _parseConflict(raw);
+    return {
+      path: path, orig: c.orig, saved: c.saved, title: c.title,
+      id: c.id, fm: c.fm, body: c.body, raw: c.raw, parseable: c.parseable,
+    };
+  }
+  async function _dropConflict(path) {
+    try { await pfs().unlink(DIR + '/' + path); } catch (_) {}
+  }
+  /** 用远端留底这版覆盖本地同名笔记；标脏，下轮同步把结果推上去。 */
+  async function applyConflict(path) {
+    const v = await readConflict(path);
+    if (!/^notes\//.test(v.orig) || !v.parseable) {
+      throw new Error('这份留底不是可覆盖的笔记内容，请在预览里手动复制正文');
+    }
+    const id = v.id || v.orig.slice(6, -3);
+    const fm = v.fm;
+    const doc = (window.editor && window.editor.parseMdToDoc) ? window.editor.parseMdToDoc(v.body) : null;
+    const noteData = {
+      id: id, title: String(fm.title || '无标题'),
+      parentId: fm.parent || null, workspaceId: fm.workspace || undefined,
+      frac: fm.order || undefined, order: 0,
+      pinnedAt: fm.pinned || null, color: fm.color || null, icon: fm.icon || null,
+      expanded: fm.expanded === '1', createdAt: fm.created || undefined,
+      updatedAt: fm.updated || undefined, doc: doc, content: v.body,
+    };
+    const Sx = S();
+    if (_trash()[id] && Sx.restoreFromTrash) Sx.restoreFromTrash(id);
+    Sx._webdavApplyNote(id, noteData, { keepLedger: false });
+    Sx._gitApplyGlobal({});  // 收尾：结构自愈 + 存盘 + 全树刷新
+    if (Sx.markNotesDirtyByIds) Sx.markNotesDirtyByIds([id]);
+    else if (Sx.markDirty) Sx.markDirty('git-conflict-apply');
+    await _dropConflict(path);
+    schedulePut('conflict-apply');
+    return { id: id, title: noteData.title };
+  }
+  /** 忽略：删掉这条留底。 */
+  async function ignoreConflict(path) {
+    if (!_conflictSafePath(path)) throw new Error('非法的留底路径');
+    if (!(await _localReady())) throw new Error('本地仓库还没就绪');
+    await _dropConflict(path);
+    return { ok: true };
+  }
+
   window.gitSync = {
     loadConfig: loadConfig, startAutoSync: startAutoSync, stop: stop,
     schedulePut: schedulePut, flushPutOnHide: flushPutOnHide,
@@ -840,5 +973,7 @@
     listNoteHistory: listNoteHistory, readNoteVersion: readNoteVersion, restoreNoteVersion: restoreNoteVersion,
     pull: pull, push: push, getStatus: getStatus,
     listCommits: listCommits, commitDetail: commitDetail,
+    listConflicts: listConflicts, readConflict: readConflict,
+    applyConflict: applyConflict, ignoreConflict: ignoreConflict,
   };
 })();

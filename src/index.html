@@ -322,6 +322,13 @@
         <button id="gp-btn-pull" class="gp-btn" title="取回远端改动并合并到本地，不上传">↓ 拉取</button>
         <button id="gp-btn-push" class="gp-btn gp-btn-primary" title="上传本地提交到远端，分叉时拒绝强推">↑ 推送</button>
       </div>
+      <div id="gp-conflicts" class="gp-conflicts hidden">
+        <div class="gp-conflicts-head">
+          <span>冲突留底 <span id="gp-conflicts-count" class="gp-conflicts-count"></span></span>
+          <span class="gp-conflicts-tip">同一篇被两端都改过时，远端那版存在这儿</span>
+        </div>
+        <div id="gp-conflicts-list" class="gp-conflicts-list"></div>
+      </div>
       <div class="gp-log-head">
         <span>提交记录</span>
         <button id="gp-btn-sync" class="gp-link" title="完整同步：拉取 + 合并 + 推送（等同顶栏立即同步）">立即同步</button>
@@ -387,7 +394,7 @@
   <link rel="stylesheet" href="katex.min.css">
   <script defer src="katex.min.js"></script>
   <script>
-    window.__MD_VER__ = '20261115t2';
+    window.__MD_VER__ = '20261115t3';
     // 小枝第一套：Cloudflare 代取（见 docs/emoji-proxy-worker.js）；失败自动回退谷歌
     window.__NOTO_EMO_HOST__ = 'https://emoji.zhinote.net';
   </script>

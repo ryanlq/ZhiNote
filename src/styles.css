@@ -7742,6 +7742,25 @@ body.theme-dark #gh-preview-body .ProseMirror .zn-mention:hover {
 .gp-file i { display: inline-block; width: 12px; font-style: normal; font-weight: 700; }
 .gp-file.add i { color: var(--success); } .gp-file.del i { color: var(--danger); }
 .gp-foot { flex-shrink: 0; padding: 9px 16px; border-top: 1px solid var(--border); font-size: 10.5px; color: var(--text-tertiary); line-height: 1.6; }
+/* 冲突留底 */
+.gp-conflicts { flex-shrink: 0; border-bottom: 1px solid var(--border); padding: 10px 16px 6px; max-height: 40%; display: flex; flex-direction: column; }
+.gp-conflicts-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 6px; font-size: 11.5px; font-weight: 600; color: var(--text-secondary); flex-shrink: 0; }
+.gp-conflicts-count { display: inline-block; padding: 0 6px; border-radius: 9px; font-size: 10.5px; font-weight: 700; background: color-mix(in srgb, var(--warning) 20%, transparent); color: var(--warning); }
+.gp-conflicts-tip { font-weight: 400; font-size: 10px; color: var(--text-tertiary); text-align: right; }
+.gp-conflicts-list { overflow-y: auto; min-height: 0; }
+.gp-conf-item { border-top: 1px solid var(--border); padding: 7px 0; }
+.gp-conf-item:first-child { border-top: none; }
+.gp-conf-line { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.gp-conf-info { min-width: 0; flex: 1; }
+.gp-conf-name { font-size: 12px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gp-conf-meta { font-size: 10px; color: var(--text-tertiary); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gp-conf-acts { display: flex; gap: 8px; flex-shrink: 0; }
+.gp-conf-acts .gp-link { font-size: 11px; }
+.gp-conf-acts .gp-link.danger { color: var(--danger); }
+.gp-conf-acts .gp-link:disabled { opacity: .4; cursor: default; text-decoration: none; }
+.gp-conf-preview { max-height: 60vh; overflow-y: auto; }
+.gp-conf-preview-meta { font-size: 10.5px; color: var(--text-tertiary); font-family: var(--font-mono); margin-bottom: 10px; word-break: break-all; }
+.gp-conf-preview-body { font-size: 13px; line-height: 1.7; }
 
 /* 手机端（≤768px）：面板改为右侧抽屉，遮罩点击收起 */
 @media (max-width: 768px) {
