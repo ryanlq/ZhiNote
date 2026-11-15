@@ -32,7 +32,7 @@
       else if (typeof o.body === 'string') payload = o.body;
       else if (o.body instanceof Uint8Array) payload = o.body;
       else payload = await _concat(o.body, o.onProgress); // AsyncIterable
-      const resp = await fetch(o.url, { method: o.method || 'GET', headers: o.headers || {}, body: payload });
+      const resp = await fetch(o.url, { method: o.method || 'GET', headers: o.headers || {}, body: payload, signal: o.signal });
       const outHeaders = {};
       resp.headers.forEach(function (v, k) { outHeaders[k.toLowerCase()] = v; });
       const bytes = new Uint8Array(await resp.arrayBuffer());

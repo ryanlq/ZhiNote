@@ -693,11 +693,24 @@
   async function testConnection(over) {
     const c = Object.assign(cfg(), over || {});
     if (!c.url) throw new Error('还没填仓库地址');
+    // 密码框不回填（只存本机），表单留空时回退用已保存的密码，否则测试连接会拿空密码去撞 401
+    if (!c.pass) c.pass = String(gs(K.pass, ''));
     const fs2 = _fs || (window.LightningFS ? new window.LightningFS(FS_NAME) : null);
     const auth = (c.user || c.pass) ? { username: c.user || 'anonymous', password: c.pass } : undefined;
-    const info = await git.getRemoteInfo({ fs: fs2, http: window.gitHttp, dir: DIR, url: c.url, onAuth: () => auth });
-    const heads = (info.refs && info.refs.heads) || {};
-    return { ok: true, branches: Object.keys(heads), hasBranch: !!heads[c.branch] };
+    // 单独给「测试连接」设超时：后端卡死时不能让按钮永远转圈（信号由 isogit-http 透传给 fetch）
+    const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 15000) : null;
+    const http = ctrl ? { request: function (o) { return window.gitHttp.request(Object.assign({}, o, { signal: ctrl.signal })); } } : window.gitHttp;
+    try {
+      const info = await git.getRemoteInfo({ fs: fs2, http: http, dir: DIR, url: c.url, onAuth: () => auth });
+      const heads = (info.refs && info.refs.heads) || {};
+      return { ok: true, branches: Object.keys(heads), hasBranch: !!heads[c.branch] };
+    } catch (e) {
+      if (ctrl && ctrl.signal.aborted) throw new Error('服务器 15 秒内无响应，Git 服务可能卡住，请稍后重试');
+      throw e;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   // ---- 阶段2：版本历史 ----

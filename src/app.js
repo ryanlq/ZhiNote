@@ -5107,14 +5107,23 @@ function _webAppUrl() {
  * 给人看的号 = window.__MD_VER__（打包注入）。网页端 whats-new.json 的 id/ver 打包时写成同一串。
  * 版本已读、勿扰、跟这台走的勾删只写本机；跟笔记走的勾删进 settings.bellMsgAcks 随账号。 */
 const WHATS_NEW = {
-  id: window.__MD_VER__ || '20261115t1',
+  id: window.__MD_VER__ || '20261115t2',
   date: '2026-11-15',
   items: [
-    { title: 'Git 同步面板', text: '新增右侧 Git 面板，集中查看仓库状态与提交记录，随手拉取、推送，不用再到处找入口。' },
-    { title: '主动拉取 / 推送', text: '拉取与推送拆成独立按钮。拉取会先保存本地改动再合并远端，绝不覆盖未保存的编辑；推送遇到远端有更新时提示先拉取，绝不强制覆盖。' },
-    { title: '提交记录与分支状态', text: '可查看整仓提交历史与每次改动的文件，面板显示当前分支、HEAD、领先/落后条数及上次同步时间。' },
+    { title: '测试连接不再误报', text: '修复 Git 面板「测试连接」：密码框出于安全不回填，此前留空会用空密码去连，误报 401。现在留空自动沿用已保存的密码。' },
+    { title: '保存不再冲掉密码', text: '改分支或提交署名后保存，不会再因密码框为空而把已保存的密码清空，导致自动同步跟着失败。' },
+    { title: '卡住时有明确提示', text: '测试连接加了 15 秒超时：服务器无响应时明确报错，不再一直停在「正在连接」。' },
   ],
   history: [
+    {
+      ver: 'v2.2.3',
+      date: '2026-11-15',
+      items: [
+        { title: 'Git 同步面板', text: '新增右侧 Git 面板，集中查看仓库状态与提交记录，随手拉取、推送，不用再到处找入口。' },
+        { title: '主动拉取 / 推送', text: '拉取与推送拆成独立按钮。拉取会先保存本地改动再合并远端，绝不覆盖未保存的编辑；推送遇到远端有更新时提示先拉取，绝不强制覆盖。' },
+        { title: '提交记录与分支状态', text: '可查看整仓提交历史与每次改动的文件，面板显示当前分支、HEAD、领先/落后条数及上次同步时间。' },
+      ],
+    },
     {
       ver: 'v2.2.2',
       date: '2026-11-12',
@@ -8029,7 +8038,7 @@ function openSettingsModal(initialTab) {
             if (curSyncMethod !== 'git') return true;
             const g = _readGitFields();
             return g.url !== (storage.getSetting('gitUrl') || '') || g.user !== (storage.getSetting('gitUser') || '')
-              || g.pass !== (storage.getSetting('gitPass') || '') || g.branch !== (storage.getSetting('gitBranch') || 'main');
+              || (g.pass && g.pass !== (storage.getSetting('gitPass') || '')) || g.branch !== (storage.getSetting('gitBranch') || 'main');
           }
           if (selectedMethod === 'none') return curSyncMethod !== 'none';
           if (curSyncMethod !== 'webdav') return true;
@@ -8105,16 +8114,18 @@ function openSettingsModal(initialTab) {
           } else if (selectedMethod === 'git') {
           const g = _readGitFields();
           if (!g.url) { toast('请填写 Git 仓库地址', 'warning'); return; }
+          // 密码框不回填：留空代表「不改动」，沿用已保存的密码，避免空串把真密码冲掉
+          const gPass = g.pass || (storage.getSetting('gitPass') || '');
           try {
             // 先落配置再切后端；测试连接失败时配置已保存（backend 未启动），提示排查
             await storage.switchSyncMethod('git', {
-              gitUrl: g.url, gitUser: g.user, gitPass: g.pass, gitBranch: g.branch,
+              gitUrl: g.url, gitUser: g.user, gitPass: gPass, gitBranch: g.branch,
               gitAuthorName: g.an, gitAuthorEmail: g.ae, autoStart: false,
             });
             _setCloudSyncDot('syncing', 'heavy');
             await window.gitSync.loadConfig();
             try {
-              await window.gitSync.testConnection({ url: g.url, user: g.user, pass: g.pass, branch: g.branch });
+              await window.gitSync.testConnection({ url: g.url, user: g.user, pass: gPass, branch: g.branch });
               await window.gitSync.startAutoSync();
               toast('已切换到 Git 仓库同步（明文存储 · 完整版本历史）', 'success');
             } catch (te) {
