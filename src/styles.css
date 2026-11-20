@@ -1378,6 +1378,21 @@ body.theme-dark ::highlight(md-search-current) {
 }
 .cloud-badge.local    { background: #6fa0e0; opacity: 1; }   /* 已存本机、未上云 */
 .cloud-badge.synced   { background: #5fb87a; opacity: 0.9; } /* 云端已传 */
+/* Git 冲突角标：顶栏 Git 按钮右上角红点，有待处理的冲突留底时常亮 */
+.git-conflict-badge {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #e5484d;
+  opacity: 0;
+  transform: scale(0.5);
+  pointer-events: none;
+  transition: opacity var(--transition), transform var(--transition);
+}
+.git-conflict-badge.show { opacity: 1; transform: scale(1); }
 /* 短传：呼吸明暗（与紫点同一套语言）。延迟 1s——打字上传一两秒内完事几乎无感。 */
 .cloud-badge.syncing  { background: #5fb87a; opacity: 1; animation: cloudBadgeBreathe 2s ease-in-out 1s infinite; }
 .cloud-badge.pending  { background: #d9a441; opacity: 1; }   /* 警告：限流/重试 */
@@ -7746,6 +7761,24 @@ body.theme-dark #gh-preview-body .ProseMirror .zn-mention:hover {
 .gp-conflicts { flex-shrink: 0; border-bottom: 1px solid var(--border); padding: 10px 16px 6px; max-height: 40%; display: flex; flex-direction: column; }
 .gp-conflicts-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 6px; font-size: 11.5px; font-weight: 600; color: var(--text-secondary); flex-shrink: 0; }
 .gp-conflicts-count { display: inline-block; padding: 0 6px; border-radius: 9px; font-size: 10.5px; font-weight: 700; background: color-mix(in srgb, var(--warning) 20%, transparent); color: var(--warning); }
+/* 冲突预览：双栏对照 + 差异高亮 + 底部处理条 */
+.gp-conf-preview { padding: 14px 16px; display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.gp-conf-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; flex: 1; min-height: 0; }
+@media (max-width: 760px) { .gp-conf-cols { grid-template-columns: 1fr; } }
+.gp-conf-col { border: 1px solid var(--border); border-radius: var(--radius); overflow: auto; min-height: 0; }
+.gp-conf-col-head { position: sticky; top: 0; z-index: 1; padding: 6px 12px; font-size: 12px; font-weight: 600; color: var(--text-secondary); background: var(--bg-secondary); border-bottom: 1px solid var(--border); }
+.gp-conf-col-body { padding: 10px 14px; font-size: 13.5px; }
+.gp-diff-add  { background: color-mix(in srgb, #5fb87a 16%, transparent); border-radius: 4px; }
+.gp-diff-del  { background: color-mix(in srgb, var(--danger) 12%, transparent); border-radius: 4px; }
+.gp-diff-mod  { background: color-mix(in srgb, var(--warning) 16%, transparent); border-radius: 4px; }
+.gp-conf-empty { color: var(--text-tertiary); text-align: center; padding: 24px 0; }
+.gp-conf-preview-actions { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; flex-shrink: 0; }
+.gp-conf-preview-hint { flex: 1; min-width: 200px; font-size: 12px; color: var(--text-tertiary); }
+.gp-arm-danger { color: #fff !important; background: var(--danger) !important; border-color: transparent !important; }
+/* toast 行内操作按钮（如冲突提示的「查看」） */
+.toast-actions { display: inline-flex; gap: 6px; margin-left: 10px; vertical-align: middle; }
+.toast-action { border: 1px solid currentColor; background: transparent; color: inherit; border-radius: 6px; padding: 2px 10px; font-size: 12px; font-weight: 600; cursor: pointer; }
+.toast-action:hover { opacity: 0.75; }
 .gp-conflicts-tip { font-weight: 400; font-size: 10px; color: var(--text-tertiary); text-align: right; }
 .gp-conflicts-list { overflow-y: auto; min-height: 0; }
 .gp-conf-item { border-top: 1px solid var(--border); padding: 7px 0; }
@@ -7758,9 +7791,7 @@ body.theme-dark #gh-preview-body .ProseMirror .zn-mention:hover {
 .gp-conf-acts .gp-link { font-size: 11px; }
 .gp-conf-acts .gp-link.danger { color: var(--danger); }
 .gp-conf-acts .gp-link:disabled { opacity: .4; cursor: default; text-decoration: none; }
-.gp-conf-preview { max-height: 60vh; overflow-y: auto; }
 .gp-conf-preview-meta { font-size: 10.5px; color: var(--text-tertiary); font-family: var(--font-mono); margin-bottom: 10px; word-break: break-all; }
-.gp-conf-preview-body { font-size: 13px; line-height: 1.7; }
 
 /* 手机端（≤768px）：面板改为右侧抽屉，遮罩点击收起 */
 @media (max-width: 768px) {

@@ -307,7 +307,8 @@ async function bootstrap() {
   });
   storage.on('cloud-sync', (payload) => {
     // Git 后端事件归一：git-sync-start/ok/fail/error → webdav-sync-* 同语义（绿点/保护条/toast 全复用）
-    if (payload && typeof payload.type === 'string' && payload.type.indexOf('git-sync-') === 0) {
+    const isGitEvent = payload && typeof payload.type === 'string' && payload.type.indexOf('git-sync-') === 0;
+    if (isGitEvent) {
       payload.type = 'webdav-sync-' + payload.type.slice(9);
     }
     if (payload.type === 'webdav-sync-start') {
@@ -327,6 +328,8 @@ async function bootstrap() {
       if (n > 0) toast('后台核对发现 ' + n + ' 篇没对齐，已自动修正', 'info', { duration: 6000 });
     } else if (payload.type === 'webdav-sync-ok') {
       if (_syncProtectionActive) _endSyncProtection();
+      // Git 同步一轮结束：冲突留底有新增时主动提示 + 顶栏角标（基线首轮不弹）
+      if (isGitEvent) _gpNotifyNewConflicts();
       // 徽标悬停小详情：记下上次传/收篇数，拼进 tooltip（不占界面位置）
       try {
         const up = payload.uploaded | 0;
@@ -427,6 +430,8 @@ async function bootstrap() {
     // 即时同步重判：realtime.js 的 init 可能在 storage 数据加载完成前就跑过一次 applyConfig，
     // 那时 syncMethod 还是空 → _enabled 被钉死为 false 且无人重评。此处设置已就绪，补评一次。
     try { window.realtime && window.realtime.applyConfig(); } catch (_) {}
+    // Git 冲突留底角标/基线（仅在 Git 模式下生效）
+    try { _gpNotifyNewConflicts(); } catch (_) {}
   });
 
   refreshEditorModeBar();
@@ -4785,6 +4790,32 @@ async function _gpLoadDetail(host, oid) {
 }
 
 // ---- 冲突留底 ----
+// 冲突角标 + 主动提示：留底数量增加时 toast；顶栏 Git 按钮挂红点（有待处理留底时常亮）
+let _gpConflictCount = null;   // null = 尚未建立基线（首轮只记数不弹提示）
+async function _gpRefreshConflictBadge() {
+  const btn = document.getElementById('btn-git-panel');
+  if (!btn || !window.gitSync || typeof window.gitSync.listConflicts !== 'function') return null;
+  let list = [];
+  try { list = await window.gitSync.listConflicts(); } catch (_) { return null; }
+  let dot = document.getElementById('git-conflict-badge');
+  if (!dot) {
+    dot = document.createElement('span');
+    dot.id = 'git-conflict-badge';
+    dot.className = 'git-conflict-badge';
+    btn.appendChild(dot);
+  }
+  dot.classList.toggle('show', list.length > 0);
+  dot.title = '有 ' + list.length + ' 条冲突留底待处理';
+  return list.length;
+}
+async function _gpNotifyNewConflicts() {
+  const n = await _gpRefreshConflictBadge();
+  if (n == null) return;
+  if (_gpConflictCount != null && n > _gpConflictCount) {
+    toast('Git 同步发现 ' + (n - _gpConflictCount) + ' 处两端都改过的冲突：已按本地为准，远端版本留底在 Git 面板「冲突留底」，可预览或恢复', 'warning', { duration: 12000 });
+  }
+  _gpConflictCount = n;
+}
 function _gpConflictTime(s) {
   s = String(s || '');
   const m = /^(\d{4}-\d{2}-\d{2})T?[\s-]?(\d{2})[-:]?(\d{2})?/.exec(s);
@@ -4808,51 +4839,198 @@ function _gpRenderConflicts(host, list) {
       b.textContent = label; b.addEventListener('click', fn); return b;
     }
     acts.appendChild(mkBtn('预览', '', () => _gpConflictPreview(c.path)));
-    const apply = mkBtn('用这版覆盖', '', () => _gpConflictApply(c.path));
-    if (!c.canApply) { apply.disabled = true; apply.title = '这份留底不是笔记内容，请预览后手动复制'; }
-    acts.appendChild(apply);
+    if (c.id) acts.appendChild(mkBtn('打开笔记', '', () => _gpOpenConflictNote(c.id)));
+    if (c.canApply) {
+      acts.appendChild(mkBtn('仅恢复正文', '', () => _gpConflictApply(c.path, 'body')));
+      acts.appendChild(mkBtn('用这版覆盖', '', () => _gpConflictApply(c.path)));
+    } else {
+      const no = mkBtn('用这版覆盖', '', () => {});
+      no.disabled = true;
+      no.title = '这份留底不是笔记内容，请预览后手动复制';
+      acts.appendChild(no);
+    }
     acts.appendChild(mkBtn('忽略', 'danger', () => _gpConflictIgnore(c.path)));
     line.appendChild(info); line.appendChild(acts);
     item.appendChild(line);
     host.appendChild(item);
   });
 }
+// ---- 预览双栏对照：按空行分块（代码围栏内不切）→ 双向 LCS 高亮 → 逐块渲染 ----
+function _gpMdBlocks(md) {
+  const lines = String(md || '').replace(/\r\n/g, '\n').split('\n');
+  const blocks = [];
+  let cur = [], fence = false;
+  for (const ln of lines) {
+    if (/^\s*(```|~~~)/.test(ln)) { fence = !fence; cur.push(ln); continue; }
+    if (!fence && ln.trim() === '') { if (cur.length) { blocks.push(cur.join('\n')); cur = []; } continue; }
+    cur.push(ln);
+  }
+  if (cur.length) blocks.push(cur.join('\n'));
+  return blocks;
+}
+/** 双向差异标记：a/b 同为分块数组，返回每块 'same'|'del'(只本地有)|'add'(只远端有)|'mod'(两边都改且不同)。 */
+function _gpDiffMarks(a, b) {
+  const ma = a.map(() => 'same'), mb = b.map(() => 'same');
+  let hunks = [];
+  try { hunks = (window.gitSync && window.gitSync.alignHunks) ? window.gitSync.alignHunks(a, b) : []; } catch (_) {}
+  for (const h of hunks) {
+    if (h.a1 > h.a0 && h.b1 > h.b0) {
+      for (let k = h.a0; k < h.a1; k++) ma[k] = 'mod';
+      for (let k = h.b0; k < h.b1; k++) mb[k] = 'mod';
+    } else if (h.b1 > h.b0) {
+      for (let k = h.b0; k < h.b1; k++) mb[k] = 'add';
+    } else {
+      for (let k = h.a0; k < h.a1; k++) ma[k] = 'del';
+    }
+  }
+  return { ma, mb };
+}
+function _gpRenderMdSide(md, marks) {
+  const render = (window.editor && window.editor.renderMdPreviewHtml)
+    ? (t) => window.editor.renderMdPreviewHtml(t)
+    : (t) => '<p>' + escapeHtml(t) + '</p>';
+  const blocks = _gpMdBlocks(md);
+  if (!marks || blocks.length > 160) return blocks.map((b) => render(b)).join('');  // 超长放弃高亮
+  return blocks.map((b, i) => {
+    const k = marks[i] || 'same';
+    if (k === 'same') return render(b);
+    return '<div class="gp-diff-' + k + '">' + render(b) + '</div>';
+  }).join('');
+}
+/** 预览底部按钮的「两击确认」：首击变红倒计时，再击才执行。 */
+function _gpArmButton(btn, confirmLabel, fn) {
+  if (btn.dataset.armed === '1') { fn(); return; }
+  btn.dataset.armed = '1';
+  btn.dataset.label = btn.textContent;
+  btn.textContent = confirmLabel;
+  btn.classList.add('gp-arm-danger');
+  btn._armTimer = setTimeout(() => { btn.dataset.armed = ''; btn.textContent = btn.dataset.label; btn.classList.remove('gp-arm-danger'); }, 4000);
+}
 async function _gpConflictPreview(path) {
   try {
     const v = await window.gitSync.readConflict(path);
-    const wrap = document.createElement('div'); wrap.className = 'gp-conf-preview';
-    const meta = document.createElement('div'); meta.className = 'gp-conf-preview-meta';
+    const wrap = document.createElement('div');
+    wrap.className = 'gp-conf-preview';
+    const meta = document.createElement('div');
+    meta.className = 'gp-conf-preview-meta';
     meta.textContent = (v.orig || path) + ' · 留底于 ' + _gpConflictTime(v.saved);
-    const body = document.createElement('div'); body.className = 'gp-conf-preview-body ProseMirror';
-    if (window.editor && window.editor.renderMdPreviewHtml) {
-      body.innerHTML = window.editor.renderMdPreviewHtml(v.body || '');
-    } else {
-      body.textContent = v.body || '（空内容）';
+    wrap.appendChild(meta);
+
+    // 本地当前版（笔记在回收站也能看）
+    let localMd = null, localHead = '本地当前版';
+    let n = null, inTrash = false;
+    try {
+      const d = window.storage.getAll();
+      if (v.id) {
+        n = (d.notes || {})[v.id] || null;
+        if (!n && (d.trash || {})[v.id]) { n = d.trash[v.id]; inTrash = true; }
+      }
+    } catch (_) {}
+    if (n) {
+      if (inTrash) localHead = '本地当前版（已删入回收站）';
+      localMd = (n.doc && window.editor && window.editor.serializeDocToMd)
+        ? String(window.editor.serializeDocToMd(n.doc) || '')
+        : String(n.content || '');
     }
-    wrap.appendChild(meta); wrap.appendChild(body);
-    openModal({ title: '冲突留底 · 远端那版', body: wrap, dialogClass: 'git-history-modal' });
+
+    const canApply = v.parseable && /^notes\//.test(v.orig);
+    const cols = document.createElement('div');
+    cols.className = 'gp-conf-cols';
+    const mkCol = (head, html, empty) => {
+      const c = document.createElement('div'); c.className = 'gp-conf-col';
+      const h = document.createElement('div'); h.className = 'gp-conf-col-head'; h.textContent = head;
+      const body = document.createElement('div'); body.className = 'gp-conf-col-body ProseMirror';
+      if (empty) body.innerHTML = '<div class="gp-conf-empty">' + escapeHtml(empty) + '</div>';
+      else body.innerHTML = html || '';
+      c.appendChild(h); c.appendChild(body);
+      return c;
+    };
+    const remoteMd = v.body || '';
+    if (n && localMd != null) {
+      const lb = _gpMdBlocks(localMd), rb = _gpMdBlocks(remoteMd);
+      const marks = (lb.length <= 160 && rb.length <= 160) ? _gpDiffMarks(lb, rb) : null;
+      cols.appendChild(mkCol(localHead, _gpRenderMdSide(localMd, marks ? marks.ma : null)));
+      cols.appendChild(mkCol('远端留底版', _gpRenderMdSide(remoteMd, marks ? marks.mb : null)));
+    } else {
+      cols.appendChild(mkCol(localHead, '', '本地没有这篇笔记'));
+      cols.appendChild(mkCol('远端留底版', _gpRenderMdSide(remoteMd, null)));
+    }
+    wrap.appendChild(cols);
+
+    // 底部直接处理：两击确认（首击变红，再击执行），不打断当前弹窗
+    const foot = document.createElement('div');
+    foot.className = 'gp-conf-preview-actions';
+    const hint = document.createElement('span');
+    hint.className = 'gp-conf-preview-hint';
+    hint.textContent = canApply
+      ? '绿色 = 远端新增内容；红色 = 本地独有内容。处理后的改动会在下次同步推上去。'
+      : '这份留底不是笔记内容（可能是全局配置），请对照后手动处理。';
+    foot.appendChild(hint);
+    const doAction = async (mode, btn) => {
+      try { editor.flushSave?.(); } catch (_) {}
+      try {
+        const r = await window.gitSync.applyConflict(path, mode === 'body' ? { mode: 'body' } : undefined);
+        window.closeModal();
+        toast('已' + (mode === 'body' ? '恢复正文到' : '用远端版本覆盖') + '「' + (r.title || '') + '」，将在下次同步推上去', 'success');
+        try { editor.reloadCurrent?.(); } catch (_) {}
+        refreshGitPanel();
+      } catch (e) {
+        btn.dataset.armed = ''; btn.textContent = btn.dataset.label; btn.classList.remove('gp-arm-danger');
+        toast('操作失败：' + _gpErr(e && e.message || e), 'error');
+      }
+    };
+    const mkFootBtn = (label, cls, mode, confirmLabel) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = cls; b.textContent = label;
+      b.addEventListener('click', () => _gpArmButton(b, confirmLabel, () => doAction(mode, b)));
+      return b;
+    };
+    if (canApply) {
+      foot.appendChild(mkFootBtn('仅恢复正文', 'secondary-btn', 'body', '确认恢复？'));
+      foot.appendChild(mkFootBtn('用这版覆盖本地', 'primary-btn', 'replace', '确认覆盖？'));
+    }
+    const ign = document.createElement('button');
+    ign.type = 'button'; ign.className = 'rcv-btn-soft-danger'; ign.textContent = '忽略留底';
+    ign.style.marginTop = '0';
+    ign.addEventListener('click', () => _gpArmButton(ign, '确认忽略？', async () => {
+      try { await window.gitSync.ignoreConflict(path); window.closeModal(); toast('已忽略这条留底', 'success'); refreshGitPanel(); }
+      catch (e) { ign.dataset.armed = ''; ign.textContent = '忽略留底'; ign.classList.remove('gp-arm-danger'); toast('操作失败：' + _gpErr(e && e.message || e), 'error'); }
+    }));
+    foot.appendChild(ign);
+    wrap.appendChild(foot);
+
+    openModal({ title: '冲突对照 · 本地 vs 远端', body: wrap, dialogClass: 'git-history-modal' });
   } catch (e) {
     toast('读取留底失败：' + _gpErr(e && e.message || e), 'error');
   }
 }
-async function _gpConflictApply(path) {
+async function _gpConflictApply(path, mode) {
+  const bodyOnly = mode === 'body';
   const ok = await uiConfirm({
-    title: '用远端版本覆盖本地',
-    message: '将用这份留底里的远端版本覆盖本地同名笔记。\n\n本地当前内容会被替换（仍可在笔记的版本历史里找回），改动会在下次同步推上去。\n\n确定继续吗？',
-    okText: '覆盖本地', okClass: 'primary-btn',
+    title: bodyOnly ? '仅恢复正文（保留本地位置）' : '用远端版本覆盖本地',
+    message: bodyOnly
+      ? '仅取这份留底里的标题与正文，本地笔记的位置、置顶、颜色等保持不变。\n\n改动会在下次同步推上去。确定继续吗？'
+      : '将用这份留底里的远端版本覆盖本地同名笔记。\n\n本地当前内容会被替换（仍可在笔记的版本历史里找回），改动会在下次同步推上去。\n\n确定继续吗？',
+    okText: bodyOnly ? '恢复正文' : '覆盖本地', okClass: 'primary-btn',
   });
   if (!ok) return;
   try {
     try { editor.flushSave?.(); } catch (_) {}
-    const r = await window.gitSync.applyConflict(path);
-    toast('已用远端版本覆盖「' + (r.title || '') + '」，将在下次同步推上去', 'success');
+    const r = await window.gitSync.applyConflict(path, bodyOnly ? { mode: 'body' } : undefined);
+    toast('已' + (bodyOnly ? '恢复正文到' : '用远端版本覆盖') + '「' + (r.title || '') + '」，将在下次同步推上去', 'success');
     try { editor.reloadCurrent?.(); } catch (_) {}
     refreshGitPanel();
   } catch (e) {
-    toast('覆盖失败：' + _gpErr(e && e.message || e), 'error');
+    toast('操作失败：' + _gpErr(e && e.message || e), 'error');
   }
 }
 async function _gpConflictIgnore(path) {
+  const ok = await uiConfirm({
+    title: '忽略这条留底？',
+    message: '忽略会删除这条留底记录。\n\n远端版本仍保留在 Git 历史与对方设备上，不会真正丢失；但之后想从面板里一键恢复就没有了。',
+    okText: '忽略', okClass: 'primary-btn',
+  });
+  if (!ok) return;
   try {
     await window.gitSync.ignoreConflict(path);
     toast('已忽略这条留底', 'success');
@@ -4861,6 +5039,11 @@ async function _gpConflictIgnore(path) {
     toast('操作失败：' + _gpErr(e && e.message || e), 'error');
   }
 }
+/** 从冲突条目直接跳到本地笔记（面板收起、打开正文）。 */
+function _gpOpenConflictNote(id) {
+  try { _setGitPanelOpen(false); } catch (_) {}
+  try { window.editor.open(id); } catch (e) { toast('打开笔记失败：' + (e && e.message || e), 'error'); }
+}
 async function _gpRefreshConflicts() {
   const box = document.getElementById('gp-conflicts');
   const host = document.getElementById('gp-conflicts-list');
@@ -4868,10 +5051,11 @@ async function _gpRefreshConflicts() {
   if (!box || !host || !window.gitSync || typeof window.gitSync.listConflicts !== 'function') return;
   let list = [];
   try { list = await window.gitSync.listConflicts(); } catch (_) {}
-  if (!list.length) { box.classList.add('hidden'); return; }
+  if (!list.length) { box.classList.add('hidden'); _gpRefreshConflictBadge(); return; }
   box.classList.remove('hidden');
   if (cnt) cnt.textContent = String(list.length);
   _gpRenderConflicts(host, list);
+  _gpRefreshConflictBadge();
 }
 
 async function refreshGitPanel() {
@@ -9310,6 +9494,7 @@ function toast(text, level = 'success', durationOrOpts = 2200) {
   const opts = typeof durationOrOpts === 'object' ? durationOrOpts : { duration: durationOrOpts };
   const duration = opts.duration ?? 2200;
   const id = opts.id;
+  const actions = Array.isArray(opts.actions) && opts.actions.length ? opts.actions : null;
   const c = document.getElementById('toast-container');
 
   // duration <= 0 视为"常驻"：不自动消失，需点击关闭（用于冲突/失败等重要提示，避免一闪而过看不清）
@@ -9327,22 +9512,37 @@ function toast(text, level = 'success', durationOrOpts = 2200) {
     if (!sticky) el._hideTimer = setTimeout(() => _dismiss(el), duration);
   };
 
-  // 如果已有同 id 的 toast，复用它（覆盖文本 + 重置消失计时器），不要新加一条
+  // 如果已有同 id 的 toast，复用它（覆盖文本 + 重置消失计时器），不要新加一条；
+  // 带 actions 的不复用（要重建按钮），直接撤掉旧的走新建。
   if (id) {
     const existing = c.querySelector(`.toast[data-toast-id="${id}"]`);
-    if (existing) {
+    if (existing && !actions) {
       existing.textContent = text + (sticky ? '　（点击关闭）' : '');
       existing.className = 'toast ' + level + (sticky ? ' toast-sticky' : '');
       existing.dataset.toastId = id;
       _arm(existing);
       return existing;
     }
+    if (existing) existing.remove();
   }
 
   const el = document.createElement('div');
   el.className = 'toast ' + level + (sticky ? ' toast-sticky' : '');
-  el.textContent = text + (sticky ? '　（点击关闭）' : '');
+  el.textContent = text + (sticky && !actions ? '　（点击关闭）' : '');
   if (id) el.dataset.toastId = id;
+  if (actions) {
+    const bar = document.createElement('span');
+    bar.className = 'toast-actions';
+    for (const a of actions) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'toast-action';
+      b.textContent = a.label;
+      b.addEventListener('click', (ev) => { ev.stopPropagation(); _dismiss(el); try { if (a.onClick) a.onClick(); } catch (_) {} });
+      bar.appendChild(b);
+    }
+    el.appendChild(bar);
+  }
   // 所有 toast 都支持点击立即关闭
   el.style.cursor = 'pointer';
   el.addEventListener('click', () => _dismiss(el));

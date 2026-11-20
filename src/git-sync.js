@@ -10,8 +10,14 @@
  *   tombstones.json      {v, note:{id:ts}, ws:{id:ts}, tpl:{id:ts}} —— purge 语义
  *   settings.json        共享设置（与 WebDAV _extractSharedSettings 同规则）
  * 设计取舍：
- *  - 无 struct-ledger/epoch 机器：结构 = 文件 + frontmatter；合并冲突走"单方变取该方，
- *    双方变本地为准 + 远端版本留底 conflicts/"。
+ *  - 无 struct-ledger/epoch 机器：结构 = 文件 + frontmatter。合并策略：
+ *    单方变取该方；双方变先自动融合（正文行级 diff3 + frontmatter 字段级三路、
+ *    workspaces/tombstones/settings 结构化并集），真撞车才本地为准 + 远端留底 conflicts/。
+ *    留底带内容哈希去重，绝不重复堆积；决议后必须补双亲 merge commit
+ *    （parent:[ours,theirs]）推进 HEAD，否则 push 永久非快进失败、留底每轮翻倍（v2.2.x 老坑）。
+ *  - 删除保护：本地已删（回收站/墓碑）的笔记，远端"改了"不复活，远端版照旧留底可找回。
+ *  - isogit 的 merge（快进/干净合并）只前进 ref、不落工作区 → 合并后必须 force checkout，
+ *    否则 _applyRemote 读工作区拿到旧内容，"下载"静默失效（v2.2.x 隐藏 bug）。
  *  - ydoc 防复活：远端内容真变时 noteData 不带 ydoc 且 keepLedger:false → 笔记无账本，
  *    editor._bindNoteCrdt 对无账本笔记用 clientID=0 确定性创世，天然重置。
  *  - LightningFS(IndexedDB) 长驻不重克隆；多标签 localStorage 互斥锁 + BroadcastChannel。
@@ -333,10 +339,14 @@
   }
 
   // ---- 远端 → 本地应用 ----
-  /** 应用远端变更。remoteOld 为 null = 全量采纳。返回应用的笔记 id 集合。 */
-  async function _applyRemote(remoteOld, remoteNew) {
-    const d = await _diffTrees(remoteOld, remoteNew);
-    const changed = d.changed, removed = d.removed, newMap = d.newMap;
+  /** 应用合并结果。baseOid→resultOid 决定「哪些文件内容要套用」；
+   *  actionsBaseOid→resultOid（纯远端动作：快进=合并前HEAD，否则=上次 fetch 点）单独决定「远端删了什么」，
+   *  避免把我们自己的删除误判成远端删除（误清回收站/误下线笔记）。返回应用的笔记 id 集合。 */
+  async function _applyRemote(baseOid, resultOid, actionsBaseOid) {
+    const d = await _diffTrees(baseOid, resultOid);
+    const dAct = actionsBaseOid && actionsBaseOid !== resultOid ? await _diffTrees(actionsBaseOid, resultOid) : null;
+    const changed = d.changed, newMap = d.newMap;
+    const removedAct = (dAct || d).removed;
     const applied = new Set();
 
     // 1) 墓碑（purge 语义）：远端已永久删除 → 本端下线
@@ -360,7 +370,7 @@
     }
     if (changed['settings.json']) global.settings = JSON.parse((await wfRead('settings.json')) || '{}') || {};
     const tplTouched = Object.keys(changed).some(p => p.indexOf('templates/') === 0) ||
-                       Object.keys(removed).some(p => p.indexOf('templates/') === 0);
+                       Object.keys(removedAct).some(p => p.indexOf('templates/') === 0);
     if (tplTouched) {
       const tplTomb = _tomb().tpl || {};
       const templates = [];
@@ -394,7 +404,7 @@
       const id = p.slice(6, -3);
       if (_notes()[id]) { S()._webdavRemoveNote(id); applied.add(id); }
     }
-    for (const p of Object.keys(removed)) {
+    for (const p of Object.keys(removedAct)) {
       if (p.indexOf('trash/') !== 0 || !/\.md$/.test(p)) continue;
       const id = p.slice(6, -3);
       if (!_notes()[id] && _trash()[id] && !newMap['notes/' + id + '.md'] && !_tomb().note[id]) {
@@ -402,13 +412,14 @@
       }
     }
 
-    // 5) 笔记文件（最后应用：还原场景先 restore 再套用内容）
+    // 5) 笔记文件（最后应用：先解析成功才还原——文件不存在=决议保留删除，绝不复活）
     for (const p of Object.keys(changed)) {
       if (p.indexOf('notes/') !== 0 || !/\.md$/.test(p)) continue;
       const id = p.slice(6, -3);
+      const raw = await wfRead(p);
+      const parsed = raw != null ? _fmParse(raw) : null;
+      if (!parsed) { log('跳过无法解析/不存在的远端笔记 ' + p); continue; }
       if (_trash()[id]) S().restoreFromTrash(id);          // 远端把回收站笔记还原了
-      const parsed = _fmParse(await wfRead(p));
-      if (!parsed) { log('跳过无法解析的远端笔记 ' + p); continue; }
       const fm = parsed.fm;
       const doc = (window.editor && window.editor.parseMdToDoc) ? window.editor.parseMdToDoc(parsed.body) : null;
       const noteData = {
@@ -432,7 +443,7 @@
     }
 
     // 6) 远端删掉的笔记文件（非移入回收站、非 purge → 防御性移入回收站）
-    for (const p of Object.keys(removed)) {
+    for (const p of Object.keys(removedAct)) {
       if (p.indexOf('notes/') !== 0 || !/\.md$/.test(p)) continue;
       const id = p.slice(6, -3);
       if (newMap['trash/' + id + '.md'] || _tomb().note[id]) continue;
@@ -494,10 +505,17 @@
       present[p] = true;
     }
 
-    // 写入有变化的；删除已消失的（本地 purge 后文件不再存在）
+    // 写入有变化的；删除已消失的（本地 purge 后文件不再存在）。
+    // 哈希不同但工作区已是同内容（合并检出后远端/决议版本已应用进存储）→ 只登记不重写，避免空提交。
     let changed = 0;
     for (const w of writes) {
-      if (_exported[w.path] !== hashStr(w.content)) { await wfWrite(w.path, w.content); changed++; }
+      const h = hashStr(w.content);
+      if (_exported[w.path] === h) continue;
+      let cur = null;
+      try { cur = await pfs().readFile(DIR + '/' + w.path, 'utf8'); } catch (_) {}
+      if (cur === w.content) { _exported[w.path] = h; continue; }
+      await wfWrite(w.path, w.content);
+      changed++;
     }
     for (const path in _exported) {
       if (!present[path]) { await wfRm(path); changed++; }
@@ -507,7 +525,8 @@
 
   // ---- 暂存 / 提交 / 推送 ----
   let _pendingRm = [];   // 待从 git 索引移除的路径（wfRm 登记，提交时统一 remove）
-  async function _commitAll(message) {
+  /** parents 非空时创建双亲提交（手动 merge commit），否则普通单亲提交。 */
+  async function _commitAll(message, parents) {
     for (const path of Object.keys(_exported)) {
       try { await git.add({ fs: _fs, dir: DIR, filepath: path }); }
       catch (_) { try { await git.remove({ fs: _fs, dir: DIR, filepath: path }); } catch (_) {} }
@@ -516,7 +535,9 @@
       try { await git.remove({ fs: _fs, dir: DIR, filepath: path }); } catch (_) {}
     }
     _pendingRm = [];
-    return await git.commit({ fs: _fs, dir: DIR, message: message, author: author() });
+    const opts = { fs: _fs, dir: DIR, message: message, author: author() };
+    if (parents && parents.length) opts.parent = parents;
+    return await git.commit(opts);
   }
   async function _push() {
     const c = cfg();
@@ -524,13 +545,188 @@
     if (!pr.ok) throw new Error('push 失败：' + (pr.error && pr.error.message || JSON.stringify(pr.error || '')));
   }
 
-  // ---- 合并冲突按文件处理：单方变取该方；双方变本地为准 + 远端留底 conflicts/ ----
-  async function _resolvePerFileKeepBoth(oursHead, theirsHead, baseHead) {
+  // ---- 行级 diff3 自动合并（笔记正文撞车的第一道工序，合不动才留底）----
+  /** a→b 的编辑区段 [{a0,a1,b0,b1}]：a[a0:a1] 被 b[b0:b1] 替换（行号左闭右开）。 */
+  function _alignHunks(a, b) {
+    const n = a.length, m = b.length, W = m + 1;
+    const dp = new Int32Array((n + 1) * W);
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) {
+        dp[i * W + j] = a[i] === b[j] ? dp[(i + 1) * W + (j + 1)] + 1 : Math.max(dp[(i + 1) * W + j], dp[i * W + (j + 1)]);
+      }
+    }
+    const hunks = [];
+    let i = 0, j = 0;
+    for (;;) {
+      while (i < n && j < m && a[i] === b[j]) { i++; j++; }
+      if (i >= n || j >= m) {
+        if (i < n || j < m) hunks.push({ a0: i, a1: n, b0: j, b1: m });
+        break;
+      }
+      const a0 = i, b0 = j;
+      while (i < n && j < m && a[i] !== b[j]) {
+        if (dp[(i + 1) * W + j] >= dp[i * W + (j + 1)]) i++; else j++;
+      }
+      hunks.push({ a0: a0, a1: i, b0: b0, b1: j });
+    }
+    return hunks;
+  }
+  /** 经典 diff3：无重叠冲突 → 返回合并后的行数组；重叠且两边改得不一样 → null（交给留底）。 */
+  function _diff3Lines(base, ours, theirs) {
+    if (base.length * (ours.length + theirs.length) > 4000000) return null; // 超长放弃自动合并
+    const ho = _alignHunks(base, ours), ht = _alignHunks(base, theirs);
+    const out = [];
+    let pos = 0, io = 0, it = 0;
+    while (io < ho.length || it < ht.length) {
+      const hO = ho[io], hT = ht[it];
+      const onlyO = hT === undefined || (hO !== undefined && hO.a1 < hT.a0);
+      const onlyT = hO === undefined || (hT !== undefined && hT.a1 < hO.a0);
+      if (hO && onlyO) {
+        if (hO.a0 > pos) out.push(...base.slice(pos, hO.a0));
+        out.push(...ours.slice(hO.b0, hO.b1));
+        pos = hO.a1; io++;
+      } else if (hT && onlyT) {
+        if (hT.a0 > pos) out.push(...base.slice(pos, hT.a0));
+        out.push(...theirs.slice(hT.b0, hT.b1));
+        pos = hT.a1; it++;
+      } else {
+        // 重叠/相触 → 扩成一个冲突群（吞并所有牵连的 hunk）
+        let lo = Math.min(hO.a0, hT.a0), hi = Math.max(hO.a1, hT.a1);
+        let eO = io + 1, eT = it + 1, grew = true;
+        while (grew) {
+          grew = false;
+          while (eO < ho.length && ho[eO].a0 <= hi) { if (ho[eO].a1 > hi) { hi = ho[eO].a1; grew = true; } eO++; }
+          while (eT < ht.length && ht[eT].a0 <= hi) { if (ht[eT].a1 > hi) { hi = ht[eT].a1; grew = true; } eT++; }
+        }
+        if (lo > pos) out.push(...base.slice(pos, lo));
+        const go = ho.slice(io, eO), gt = ht.slice(it, eT);
+        const goL = go[go.length - 1], gtL = gt[gt.length - 1];
+        const oSeg = ours.slice(Math.max(0, go[0].b0 - Math.max(0, go[0].a0 - lo)), Math.min(ours.length, goL.b1 + Math.max(0, hi - goL.a1)));
+        const tSeg = theirs.slice(Math.max(0, gt[0].b0 - Math.max(0, gt[0].a0 - lo)), Math.min(theirs.length, gtL.b1 + Math.max(0, hi - gtL.a1)));
+        const same = oSeg.length === tSeg.length && oSeg.every((l, k) => l === tSeg[k]);
+        if (!same) return null;                    // 真撞车
+        out.push(...oSeg);                         // 两边改得一样 → 收一份
+        pos = hi; io = eO; it = eT;
+      }
+    }
+    if (pos < base.length) out.push(...base.slice(pos));
+    return out;
+  }
+  /** frontmatter 字段级三路：单方变取该方，双方变本地为准；updated 取较新。 */
+  function _fmMergeThree(fmO, fmT, fmB) {
+    const out = Object.assign({}, fmO);
+    const keys = {};
+    for (const k in fmT) keys[k] = 1;
+    for (const k in fmB) keys[k] = 1;
+    for (const k in fmO) keys[k] = 1;
+    for (const k of Object.keys(keys)) {
+      const ov = fmO[k], tv = fmT[k], bv = fmB ? fmB[k] : undefined;
+      if (k === 'updated') { const mx = [ov, tv].sort().pop(); if (mx != null) out[k] = mx; continue; }
+      if (JSON.stringify(ov) === JSON.stringify(bv) && JSON.stringify(tv) !== JSON.stringify(bv)) out[k] = tv; // 仅远端变
+    }
+    return out;
+  }
+  /** 双方都变的笔记文件：正文 diff3 + frontmatter 字段级合并。成功返回合并后全文，失败 null。 */
+  function _autoMergeNoteText(oText, tText, bText) {
+    const po = _fmParse(oText), pt = _fmParse(tText), pb = bText != null ? _fmParse(bText) : null;
+    if (!po || !pt || !pb) return null;
+    const merged = _diff3Lines(pb.body.split('\n'), po.body.split('\n'), pt.body.split('\n'));
+    if (merged == null) return null;
+    return _fmStringify(_fmMergeThree(po.fm, pt.fm, pb.fm), merged.join('\n'));
+  }
+  function _tsMapUnion(a, b) {
+    const out = Object.assign({}, a || {});
+    for (const k in (b || {})) { if (!(k in out) || String(b[k]) > String(out[k])) out[k] = b[k]; }
+    return out;
+  }
+  /** 全局 JSON 双方变：结构化合并（墓碑并集 / 笔记本并集 / 设置按键三路），合不动返回 null。 */
+  function _mergeGlobalJsonText(p, oText, tText, bText) {
+    let mo, mt, mb = null;
+    try { mo = JSON.parse(oText); mt = JSON.parse(tText); if (bText != null) mb = JSON.parse(bText); } catch (_) { return null; }
+    if (!mo || !mt || typeof mo !== 'object' || typeof mt !== 'object') return null;
+    try {
+      if (p === 'tombstones.json') {
+        return JSON.stringify({ v: 1, note: _tsMapUnion(mo.note, mt.note), ws: _tsMapUnion(mo.ws, mt.ws), tpl: _tsMapUnion(mo.tpl, mt.tpl) });
+      }
+      if (p === 'workspaces.json' && Array.isArray(mo.workspaces) && Array.isArray(mt.workspaces)) {
+        const del = _tsMapUnion(mo.wsDeleted, mt.wsDeleted);
+        const byId = {};
+        for (const w of mt.workspaces) if (w && w.id) byId[w.id] = w;
+        for (const w of mo.workspaces) if (w && w.id) byId[w.id] = w;   // 同 id 极罕见，本地优先
+        const workspaces = Object.keys(byId).filter(id => !del[id]).map(id => byId[id]);
+        return JSON.stringify({ v: 1, workspaces: workspaces, wsDeleted: del });
+      }
+      if (p === 'settings.json') {
+        const merged = Object.assign({}, mo);
+        for (const k of Object.keys(mt)) {
+          const hasO = Object.prototype.hasOwnProperty.call(mo, k);
+          const hasB = !!mb && Object.prototype.hasOwnProperty.call(mb, k);
+          if (!hasO) { merged[k] = mt[k]; continue; }                    // 远端新增
+          const ov = JSON.stringify(mo[k]), tv = JSON.stringify(mt[k]);
+          const bv = hasB ? JSON.stringify(mb[k]) : null;
+          const oChg = !hasB || bv !== ov, tChg = !hasB || bv !== tv;
+          if (tChg && !oChg) merged[k] = mt[k];                          // 仅远端变
+          else if (tChg && oChg && ov === tv) merged[k] = mt[k];         // 两边变得一样
+          // 其余（本地变过且与远端不同 / 都没变）→ 保持本地
+        }
+        return JSON.stringify(merged);
+      }
+    } catch (_) { return null; }
+    return null;
+  }
+
+  // ---- 合并冲突按文件决议：单方变取该方；双方变先自动融合，真撞车才本地为准 + 远端留底 conflicts/ ----
+  // 留底是「纯本地未跟踪文件」：不进 _exported、不进仓库，_exportAll 不会清它、_commitAll 不会提交它。
+  const CONFLICT_DIR = 'conflicts/';
+  let _conflictIndex = null;   // 本轮决议的留底索引：orig → Set(hash)，用于去重（防每轮同步堆积）
+  function _conflictHash(text) { return hashStr(String(text == null ? '' : text)).slice(-8); }
+  async function _loadConflictIndex() {
+    const idx = {};
+    let names = [];
+    try { names = await pfs().readdir(DIR + '/' + CONFLICT_DIR); } catch (_) { return idx; }
+    for (const name of names) {
+      if (!/\.md$/.test(name) || name.indexOf('/') >= 0 || name.indexOf('\\') >= 0) continue;
+      let raw = null;
+      try { raw = await wfRead(CONFLICT_DIR + name); } catch (_) { continue; }
+      if (!raw) continue;
+      const m = /^<!-- zhinote-conflict\s*\n([\s\S]*?)-->/.exec(raw);
+      if (!m) continue;
+      const pm = /^path:\s*(.+)$/m.exec(m[1]);
+      const hm = /^hash:\s*(\S+)/m.exec(m[1]);
+      if (!pm || !hm) continue;
+      const k = pm[1].trim();
+      (idx[k] = idx[k] || new Set()).add(hm[1].trim());
+    }
+    return idx;
+  }
+  /** 该路径对应的笔记在本端是否已被删除（回收站或墓碑）→ 决议时不得被远端复活。 */
+  function _localDeleted(p) {
+    let id = null;
+    if (p.indexOf('notes/') === 0 && /\.md$/.test(p)) id = p.slice(6, -3);
+    else if (p.indexOf('trash/') === 0 && /\.md$/.test(p)) id = p.slice(6, -3);
+    if (!id) return false;
+    const tb = _tomb();
+    return !!(_trash()[id] || (tb.note || {})[id]);
+  }
+  /** 存留底（带 orig+hash 去重）。返回是否真的新存了一份。 */
+  async function _saveConflict(p, remoteText, ts) {
+    const hash = _conflictHash(remoteText);
+    const idx = _conflictIndex || {};
+    if (idx[p] && idx[p].has(hash)) return false;
+    const conflictPath = CONFLICT_DIR + p.replace(/\//g, '-') + '-' + ts + '-' + hash + '.md';
+    // 头部注释记录原始路径/时间/内容指纹（供面板展示与去重）；正文是远端那版完整内容
+    const header = '<!-- zhinote-conflict\npath: ' + p + '\nsaved: ' + ts + '\nhash: ' + hash + '\n-->\n';
+    await wfWriteLocal(conflictPath, header + remoteText);
+    (idx[p] = idx[p] || new Set()).add(hash);
+    return true;
+  }
+  async function _resolvePerFileKeepBoth(oursHead, theirsHead, baseHead, silent) {
     const ours = await _treeFiles(oursHead);
     const theirs = await _treeFiles(theirsHead);
     const base = baseHead ? await _treeFiles(baseHead) : {};
     const ts = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
-    let saved = 0;
+    let saved = 0, autoMerged = 0;
+    _conflictIndex = await _loadConflictIndex();
     const paths = {};
     for (const p of Object.keys(theirs)) paths[p] = 1;
     for (const p of Object.keys(ours)) paths[p] = 1;
@@ -539,21 +735,39 @@
           p.indexOf('templates/') !== 0 && p !== 'workspaces.json' && p !== 'settings.json' && p !== 'tombstones.json') continue;
       const o = ours[p] != null ? await _readBlobText(oursHead, p) : null;
       const t = theirs[p] != null ? await _readBlobText(theirsHead, p) : null;
-      const b = base[p] != null ? await _readBlobText(baseHead, p) : null;
+      const b = baseHead && base[p] != null ? await _readBlobText(baseHead, p) : null;
       if (o === t) continue;                                   // 两边一致
       if (t === b) continue;                                   // 只有本地变 → 保留本地
-      if (o === b || o == null) { await wfWrite(p, t); continue; } // 只有远端变 / 本地新增缺失 → 取远端
-      // 双方都变：本地为准，远端留底（纯本地未跟踪文件，不进仓库/导出表）
-      const conflictPath = 'conflicts/' + p.replace(/\//g, '-') + '-' + ts + '.md';
-      // 头部几行注释记录原始路径/时间，供面板展示；正文是远端那版完整内容
-      const header = '<!-- zhinote-conflict\npath: ' + p + '\nsaved: ' + ts + '\n-->\n';
-      await wfWriteLocal(conflictPath, header + t);
-      saved++;
+      if (o === b || o == null) {
+        // 本地不存在且基准里有 = 本地删过 → 不复活，远端版照旧留底可找回
+        if (o == null && b != null && _localDeleted(p)) {
+          if (await _saveConflict(p, t, ts)) saved++;
+          continue;
+        }
+        await wfWrite(p, t); continue;                         // 只有远端变 / 远端还原 → 取远端
+      }
+      // 双方都变：笔记文件先试 diff3 自动融合（frontmatter 字段级三路）
+      if (o != null && t != null && (p.indexOf('notes/') === 0 || p.indexOf('trash/') === 0)) {
+        const mergedText = _autoMergeNoteText(o, t, b);
+        if (mergedText != null) { await wfWrite(p, mergedText); autoMerged++; continue; }
+      }
+      // 全局 JSON 走结构化合并（墓碑/笔记本并集、设置按键三路），不再整文件 keep-both
+      if (o != null && t != null && (p === 'tombstones.json' || p === 'workspaces.json' || p === 'settings.json')) {
+        const mergedText = _mergeGlobalJsonText(p, o, t, b);
+        if (mergedText != null) { await wfWrite(p, mergedText); autoMerged++; continue; }
+      }
+      // 真撞车：本地为准，远端留底（orig+hash 去重，绝不堆积）
+      if (await _saveConflict(p, t, ts)) saved++;
     }
+    _conflictIndex = null;
+    if (autoMerged) log('合并自动融合 ' + autoMerged + ' 个文件（diff3 / 结构化并集）');
     if (saved) {
-      log('合并冲突：' + saved + ' 个远端版本留底 conflicts/（可在 Git 面板查看）');
-      try { window.toast ? window.toast('Git 合并有冲突：' + saved + ' 个远端版本已留底，可在 Git 面板「冲突留底」查看或处理', 'warn', { duration: 8000 }) : null; } catch (_) {}
+      log('合并撞车 ' + saved + ' 个远端版本留底 conflicts/（可在 Git 面板查看）');
+      if (!silent) {
+        try { window.toast ? window.toast('Git 合并：' + (autoMerged ? autoMerged + ' 处已自动合并，' : '') + saved + ' 处两端都改过，已按本地为准，远端版本留底在 Git 面板「冲突留底」', 'warn', { duration: 10000 }) : null; } catch (_) {}
+      }
     }
+    return { saved: saved, autoMerged: autoMerged };
   }
 
   // ---- 同步周期 ----
@@ -610,26 +824,46 @@
         }
       }
     } else if (remoteNew && remoteNew !== localHead) {
-      // 3) 远端有新内容 → 快进 / merge commit / 冲突按文件 keep-both
-      let merged = false;
+      // 3) 远端有新内容 → 快进 / 干净合并 / 冲突按文件决议（自动融合优先，撞车留底）
+      const theirs = 'refs/remotes/origin/' + c.branch;
+      const preMergeHead = localHead;   // 合并前的本地 HEAD：应用合并结果的 diff 基准
+      let mergeOk = false;
+      let actionsBase = remoteOld || preMergeHead;   // 纯远端动作基准：防止把本端自己的增删误判成远端动作
       try {
-        await git.merge({ fs: _fs, http: window.gitHttp, dir: DIR, theirs: 'refs/remotes/origin/' + c.branch, fastForwardOnly: true });
-        merged = true;
+        await git.merge({ fs: _fs, http: window.gitHttp, dir: DIR, theirs: theirs, fastForwardOnly: true });
+        mergeOk = true;
+        actionsBase = preMergeHead;    // 快进：合并前 HEAD → 远端 HEAD 全是远端动作
       } catch (e1) {
+        let clean = false;
         if (remoteOld && localHead !== remoteOld) {
-          // 真分叉：本地与远端各有提交 → merge commit
+          // 真分叉：先试干净合并（不同文件互不干扰时 isogit 能合出来）
           try {
-            await git.merge({ fs: _fs, http: window.gitHttp, dir: DIR, theirs: 'refs/remotes/origin/' + c.branch, message: 'zhinote: 合并远端变更', author: author() });
-            merged = true;
-          } catch (e2) { await _resolvePerFileKeepBoth(localHead, remoteNew, remoteOld); merged = true; }
-        } else {
-          await _resolvePerFileKeepBoth(localHead, remoteNew, null);  // 冲突标记等异常情况
-          merged = true;
+            await git.merge({ fs: _fs, http: window.gitHttp, dir: DIR, theirs: theirs, message: 'zhinote: 合并远端变更', author: author() });
+            clean = true;
+          } catch (e2) { /* 冲突 / 本地含新增文件时 isogit 直接 MergeNotSupportedError → 走文件级决议 */ }
         }
+        if (!clean) {
+          // 文件级三路决议。基准优先用真 merge base（比"上次 fetch 的远端 ref"更准）
+          let baseOid = remoteOld;
+          try { const mb = await git.findMergeBase({ fs: _fs, dir: DIR, oids: [localHead, remoteNew] }); if (mb && mb[0]) baseOid = mb[0]; } catch (_) {}
+          await _resolvePerFileKeepBoth(localHead, remoteNew, baseOid, opts.silent);
+          // 关键：决议后补双亲 merge commit 推进 HEAD。不补的话 push 永久非快进失败、
+          // 每轮同步重跑决议 → conflicts/ 成倍堆积（v2.2.x「一冲突就卡死」的根因）。
+          await _commitAll('zhinote: 合并远端变更（冲突已按文件决议，撞车处以本地为准，远端留底 conflicts/）', [localHead, remoteNew]);
+          localHead = await git.resolveRef({ fs: _fs, dir: DIR, ref: 'HEAD' });
+        }
+        mergeOk = true;
       }
-      if (merged) pushed = true;
-      // 4) 应用远端增量（remoteOld → remoteNew = 纯远端贡献）
-      if (remoteOld !== remoteNew) applied = await _applyRemote(remoteOld, remoteNew);
+      if (mergeOk) {
+        // isogit 的 merge（快进/干净合并）只前进 ref、不落工作区 → 必须强制检出，
+        // 否则 _applyRemote 读工作区拿到旧内容，"下载"静默失效（v2.2.x 隐藏 bug）。untracked 的 conflicts/ 不受检出影响。
+        try { await git.checkout({ fs: _fs, dir: DIR, ref: c.branch, force: true }); } catch (e) { log('合并后检出失败：' + (e && e.message)); }
+      }
+      pushed = true;
+      // 4) 应用合并结果（内容跟随合并后的 HEAD；「远端删了什么」用纯远端动作基准单独判定）。
+      //    合并发生过就必须应用——哪怕本轮没有新 fetch（上次周期 fetch 后中断，remoteOld===remoteNew），否则下载静默丢失。
+      const resultOid = await git.resolveRef({ fs: _fs, dir: DIR, ref: 'HEAD' }).catch(function () { return null; }) || remoteNew;
+      applied = await _applyRemote(preMergeHead, resultOid, actionsBase);
     }
 
     // 5) 推送（完整同步 / push 模式）；pull 模式跳过
@@ -863,7 +1097,7 @@
 
   // ---- 阶段4：冲突留底（列出 / 预览 / 用远端版覆盖本地 / 忽略）----
   // 留底是「纯本地未跟踪文件」：不进 _exported、不进仓库，_exportAll 不会清它、_commitAll 不会提交它。
-  const CONFLICT_DIR = 'conflicts/';
+  // （CONFLICT_DIR 常量与去重索引在上方合并决议段声明）
   function _conflictSafePath(p) {
     return typeof p === 'string' && /^conflicts\/[^/]+\.md$/.test(p);
   }
@@ -929,8 +1163,10 @@
   async function _dropConflict(path) {
     try { await pfs().unlink(DIR + '/' + path); } catch (_) {}
   }
-  /** 用远端留底这版覆盖本地同名笔记；标脏，下轮同步把结果推上去。 */
-  async function applyConflict(path) {
+  /** 用远端留底这版恢复笔记。opts.mode='replace'（默认）整篇覆盖；
+   *  'body' 仅取标题+正文，位置/置顶/颜色等结构字段保留本地。标脏，下轮同步把结果推上去。 */
+  async function applyConflict(path, opts) {
+    const mode = (opts && opts.mode) || 'replace';
     const v = await readConflict(path);
     if (!/^notes\//.test(v.orig) || !v.parseable) {
       throw new Error('这份留底不是可覆盖的笔记内容，请在预览里手动复制正文');
@@ -946,6 +1182,19 @@
       expanded: fm.expanded === '1', createdAt: fm.created || undefined,
       updatedAt: fm.updated || undefined, doc: doc, content: v.body,
     };
+    if (mode === 'body') {
+      const local = _notes()[id] || _trash()[id];
+      if (local) {
+        noteData.parentId = local.parentId || null;
+        noteData.workspaceId = local.workspaceId || undefined;
+        noteData.frac = local.frac || undefined;
+        noteData.pinnedAt = local.pinnedAt || null;
+        noteData.color = local.color || null;
+        noteData.icon = local.icon || null;
+        noteData.expanded = !!local.expanded;
+        noteData.createdAt = local.createdAt || noteData.createdAt;
+      }
+    }
     const Sx = S();
     if (_trash()[id] && Sx.restoreFromTrash) Sx.restoreFromTrash(id);
     Sx._webdavApplyNote(id, noteData, { keepLedger: false });
@@ -975,5 +1224,6 @@
     listCommits: listCommits, commitDetail: commitDetail,
     listConflicts: listConflicts, readConflict: readConflict,
     applyConflict: applyConflict, ignoreConflict: ignoreConflict,
+    alignHunks: _alignHunks,   // 行级 LCS 区段，供预览双栏差异高亮复用
   };
 })();
