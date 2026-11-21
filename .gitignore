@@ -4,3 +4,5 @@ node_modules/
 发布版本/
 .wrangler/
 .alma-snapshots
+realtime-relay/tmp/
+realtime-relay/*.out
