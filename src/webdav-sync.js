@@ -173,6 +173,10 @@
 
   // ─── HTTP 封装 ───────────────────────────────────────────────────────────────
   function _fetchWithTimeout(url, options = {}) {
+    // Dropbox 传输模式：同步内核照旧发 WebDAV 请求，由 dropbox-transport 翻译成 Dropbox API。
+    if (_config && _config.transport === 'dropbox' && window.dropboxTransport) {
+      return window.dropboxTransport.webdavBridge(url, options);
+    }
     const controller = new AbortController();
     // 大请求体（图片等）按体积放宽超时：固定 20s 会让慢网/经代理的大文件永远传不完、
     // 每次都在半路被中止 → 无限瞬时重试。按 ≈50KB/s 的保守带宽追加，上限 120s。
@@ -1995,6 +1999,22 @@
   // ─── 配置加载 ────────────────────────────────────────────────────────────────
   async function loadConfig() {
     if (!window.storage) return false;
+    // Dropbox 后端：复用整套同步内核，仅传输层不同（虚拟 base 由 dropbox-transport 拦截翻译）
+    if ((window.storage.getSetting('syncMethod') || 'none') === 'dropbox') {
+      _config = {
+        url: 'https://dbx.virt/', user: '', pass: '', provider: 'dropbox', transport: 'dropbox',
+        encryptNotes: window.storage.getSetting('webdavEncryptNotes') === true,
+        proxy: '',   // Dropbox API 的代理由 dropbox-transport 内部处理（同一个「跨域代理」设置）
+      };
+      _ensureClientId();
+      _invalidateSyncBaseCache();
+      window.dropboxTransport && window.dropboxTransport.configure({
+        appKey: window.storage.getSetting('dropbox_appKey') || '',
+        proxy: resolveProxy(window.storage.getSetting('webdavProxy')),
+        onChange: function () { doGet({ silent: true }); },
+      });
+      return true;
+    }
     const url = window.storage.getSetting('webdavUrl');
     const user = window.storage.getSetting('webdavUser');
     const encPass = window.storage.getSetting('webdavPass');
@@ -4083,6 +4103,9 @@
     _registerListeners();
     _resetSilenceTimer();
     _startPolling();
+    if (_config && _config.transport === 'dropbox' && window.dropboxTransport) {
+      window.dropboxTransport.startDeltaLoop();   // 远端一变（秒级 longpoll）就拉，替代轮询的迟钝
+    }
     setTimeout(() => doGet(Object.assign(_openGetOpts(), { heavy: true })), 1000); // 刚开这一拉绿点转圈；怎么拉仍由 _openGetOpts
     _scheduleFullCheck(3 * 60_000);                        // 每日慢核对：打开约 3 分钟后挑空闲跑，绝不挡打开
   }
@@ -4141,6 +4164,7 @@
     clearTimeout(_pauseResumeTimer);
     clearTimeout(_fullCheckTimer); _fullCheckTimer = null;
     _stopPolling();
+    try { window.dropboxTransport && window.dropboxTransport.stopDeltaLoop(); } catch (_) {}
     if (_imageDownloadTimer) { clearTimeout(_imageDownloadTimer); _imageDownloadTimer = null; }
     _removeListeners();
     _config = null;

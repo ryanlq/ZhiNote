@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dropbox 授权完成 · 枝记</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; background: #26282c; color: #e8e8e8;
+         display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+  .card { max-width: 460px; padding: 32px; background: #303338; border-radius: 12px; box-shadow: 0 8px 32px rgba(0,0,0,.4); }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  p { font-size: 13.5px; line-height: 1.7; color: #b8bcc2; margin: 8px 0; }
+  code { background: #1e2023; padding: 2px 6px; border-radius: 4px; font-size: 12px; word-break: break-all; }
+  textarea { width: 100%; box-sizing: border-box; height: 72px; margin-top: 8px; background: #1e2023; color: #e8e8e8;
+             border: 1px solid #45494e; border-radius: 6px; padding: 8px; font-size: 12px; }
+  .ok { color: #5fb87a; font-weight: 600; }
+  .btn { margin-top: 14px; background: #3b82f6; color: #fff; border: 0; border-radius: 8px; padding: 8px 18px; font-size: 13px; cursor: pointer; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1 class="ok">✓ Dropbox 授权完成</h1>
+  <p id="auto-msg">正在把授权结果回传给枝记窗口…</p>
+  <p id="manual" style="display:none;">自动回传不可用（多为本页与枝记不在同一浏览器）。请<b>复制下方授权码</b>，回到枝记的 Dropbox 面板粘贴到「授权码手动输入」处完成连接。</p>
+  <textarea id="code-box" readonly style="display:none;"></textarea>
+  <button id="close-btn" class="btn" style="display:none;" onclick="window.close()">关闭本页</button>
+</div>
+<script>
+(function () {
+  const params = new URLSearchParams(location.search);
+  const code = params.get('code') || '';
+  const err = params.get('error_description') || params.get('error') || '';
+
+  if (err) {
+    document.querySelector('h1').textContent = '✗ Dropbox 授权失败';
+    document.getElementById('auto-msg').textContent = err;
+    return;
+  }
+  if (!code) {
+    document.getElementById('auto-msg').textContent = 'URL 里没有授权码，请从枝记重新发起连接。';
+    return;
+  }
+  // 优先 postMessage 回开窗（同源或跨源均可）
+  let handed = false;
+  try {
+    if (window.opener && !window.opener.closed) {
+      window.opener.postMessage({ type: 'dropbox-code', code: code }, '*');
+      handed = true;
+    }
+  } catch (_) {}
+  if (handed) {
+    document.getElementById('auto-msg').innerHTML = '<span class="ok">已回传授权码，回到枝记窗口即可继续。</span>';
+  } else {
+    // 手动兜底：展示授权码供复制
+    document.getElementById('auto-msg').style.display = 'none';
+    document.getElementById('manual').style.display = '';
+    const box = document.getElementById('code-box');
+    box.value = code;
+    box.style.display = '';
+    box.focus(); box.select();
+    document.getElementById('close-btn').style.display = '';
+  }
+  setTimeout(function () { try { window.close(); } catch (_) {} }, handed ? 1500 : 8000);
+})();
+</script>
+</body>
+</html>

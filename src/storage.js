@@ -3054,7 +3054,7 @@ const storage = (() => {
 
       if (config && config.autoStart === false) return;
 
-      if (method === 'webdav' && window.webdavSync) {
+      if ((method === 'webdav' || method === 'dropbox') && window.webdavSync) {
         await window.webdavSync.loadConfig();
         window.webdavSync.startAutoSync();
       }
@@ -3088,12 +3088,12 @@ const storage = (() => {
     'unsyncedParkedIds', // 久闲对云后放进回收站、尚未上云的本机独有篇
   ];
   // 'webdav_' 前缀=同步配置；'git_' 前缀=Git 同步配置；'_' 前缀=内部迁移标记，都只留本机
-  const LOCAL_ONLY_PREFIX = ['webdav_', 'git_', '_'];
+  const LOCAL_ONLY_PREFIX = ['webdav_', 'git_', 'dropbox_', '_'];
 
   function markDirty(reason) {
     const method = getSetting('syncMethod') || 'none';
     if (method === 'none') return;
-    if (method === 'webdav' && window.webdavSync) {
+    if ((method === 'webdav' || method === 'dropbox') && window.webdavSync) {
       try {
         if (window.__MD_DEBUG__) {
           console.log('[sync-dirty]', reason || 'markDirty',
@@ -3110,7 +3110,7 @@ const storage = (() => {
   async function flushBeforeHide() {
     const method = getSetting('syncMethod') || 'none';
     if (method === 'none') return;
-    if (method === 'webdav' && window.webdavSync) {
+    if ((method === 'webdav' || method === 'dropbox') && window.webdavSync) {
       window.webdavSync.flushPutOnHide();
     }
     if (method === 'git' && window.gitSync) {
@@ -3121,7 +3121,7 @@ const storage = (() => {
   async function startAutoSync() {
     const method = getSetting('syncMethod') || 'none';
     if (method === 'none') return;
-    if (method === 'webdav' && window.webdavSync) {
+    if ((method === 'webdav' || method === 'dropbox') && window.webdavSync) {
       window.webdavSync.startAutoSync();
     }
     if (method === 'git' && window.gitSync) {

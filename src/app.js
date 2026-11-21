@@ -2318,7 +2318,8 @@ function _confirmReencryptCloud() {
 
 /** 覆盖导入/恢复前：若开启了云同步，先确认（会同时覆盖云端）。未开同步直接放行。返回是否继续。 */
 function _confirmOverwriteCloudIfSync() {
-  if ((storage.getSetting('syncMethod') || 'none') !== 'webdav') return Promise.resolve(true);
+  const _m = storage.getSetting('syncMethod') || 'none';
+  if (_m !== 'webdav' && _m !== 'dropbox') return Promise.resolve(true);
   return new Promise((resolve) => {
     const body = document.createElement('div');
     body.style.cssText = 'padding:4px 0;color:var(--text);font-size:14px;line-height:1.7;';
@@ -2339,7 +2340,8 @@ function _confirmOverwriteCloudIfSync() {
 
 /** 覆盖导入/恢复完成后：若开启云同步，用本地（导入后的结果）镜像覆盖云端，避免被替换的旧笔记从云端复活。 */
 async function _mirrorAfterOverwrite() {
-  if ((storage.getSetting('syncMethod') || 'none') !== 'webdav' || !window.webdavSync?.mirrorLocalToCloud) return;
+  const _m = storage.getSetting('syncMethod') || 'none';
+  if ((_m !== 'webdav' && _m !== 'dropbox') || !window.webdavSync?.mirrorLocalToCloud) return;
   try {
     editor.flushSave?.();
     // 可见反馈：整库重传海外网盘（如 Koofr）会较慢，给个常驻进度提示，避免用户以为"没在覆盖云端、只停在蓝色"。
@@ -4357,7 +4359,8 @@ function handleQuickerMessage(msg) {
       // Quicker 藏窗再开：visibility 常不准，显式补拉（延迟+宽限在 wakeGet 内，防空枪误报）
       setTimeout(() => {
         try {
-          if ((storage.getSetting('syncMethod') || 'none') === 'webdav' && window.webdavSync?.wakeGet) {
+          const _m = storage.getSetting('syncMethod') || 'none';
+          if ((_m === 'webdav' || _m === 'dropbox') && window.webdavSync?.wakeGet) {
             window.webdavSync.wakeGet({ force: true });
           }
         } catch (_) {}
@@ -7860,6 +7863,7 @@ function openSettingsModal(initialTab) {
       <option value="infinicloud" ${curSyncMethod==='webdav'&&curProvider==='infinicloud'?'selected':''} title="免费 20GB · 无流量限制 · 日本服务器 · 注册可能需排队">InfiniCLOUD (20GB·可能排队)</option>
       <option value="custom" ${curSyncMethod==='webdav'&&curProvider==='custom'?'selected':''} title="自行搭建或其他支持 WebDAV 的服务">自定义 WebDAV</option>
       <option value="git" ${curSyncMethod==='git'?'selected':''} title="自建 Git 仓库（明文存储）· 完整版本历史 · 支持任意时点回滚">Git 仓库（自建 · 版本历史）</option>
+      <option value="dropbox" ${curSyncMethod==='dropbox'?'selected':''} title="Dropbox 云盘 · 笔记加密后存储 · 变更秒级检测（大陆网络需代理转发 API）">Dropbox（加密存储）</option>
       <option value="none" ${curSyncMethod==='none'?'selected':''} title="关闭所有云端同步，仅本地保存">关闭同步</option>
     </select>
     <div id="sync-actions-wrap" class="${curSyncMethod==='none'?'settings-tab-hidden':''}">
@@ -7988,6 +7992,22 @@ function openSettingsModal(initialTab) {
       <button type="button" id="set-git-test" class="sync-act-btn" title="测试仓库连接与认证">测试连接</button>
     </div>
     <div id="git-sync-status" class="sync-inline-msg"></div>
+    </div>
+    <div id="sync-panel-dropbox" class="sync-panel ${curSyncMethod==='dropbox'?'':'settings-tab-hidden'}">
+    <label>Dropbox App Key</label>
+    <input type="text" id="set-dropbox-appkey" placeholder="在 Dropbox App Console 创建应用后获得" autocomplete="off" value="${escapeHtml(storage.getSetting('dropbox_appKey')||'')}" style="width:100%;">
+    <div class="sync-actions-row" style="margin-top:12px;">
+      <button type="button" id="set-dropbox-connect" class="sync-act-btn primary" title="弹出 Dropbox 授权页">连接 Dropbox</button>
+      <button type="button" id="set-dropbox-disconnect" class="sync-act-btn" title="清除本机授权与令牌">断开授权</button>
+    </div>
+    <div id="dropbox-sync-status" class="sync-inline-msg"></div>
+    <div style="font-size:12px;color:var(--text-tertiary);margin-top:14px;line-height:1.6;">
+      · 设置步骤：Dropbox App Console 创建应用（访问类型选 <b>App folder</b>，作用域含 files.read/write）→ 添加重定向地址<br>
+        <code>${(location.protocol==='file:'||location.origin==='null')?'https://zhinote.shumu.de5.net':location.origin}/dropbox-oauth.html</code> → 把 <b>App Key</b> 粘贴到上方 → 点「连接 Dropbox」；<br>
+      · 笔记<b>加密后存储</b>，Dropbox 服务器只见密文；远端变更<b>秒级检测</b>（长轮询）；<br>
+      · 大陆网络：授权弹窗需能访问 Dropbox（仅此一次）；之后的同步 API 自动走上方「跨域代理」转发；<br>
+      · 授权令牌只保存在本机，不上云不同步——换设备需重新连接。
+    </div>
     </div>
     </div>
     <div id="settings-tab-backup" class="${lastTab!=='backup'?'settings-tab-hidden':''}">
@@ -8322,6 +8342,11 @@ function openSettingsModal(initialTab) {
           } catch (_) {}
         }
         const syncChanged = (() => {
+          if (selectedMethod === 'dropbox') {
+            if (curSyncMethod !== 'dropbox') return true;
+            const dk = (body.querySelector('#set-dropbox-appkey')?.value || '').trim();
+            return dk !== (storage.getSetting('dropbox_appKey') || '');
+          }
           if (selectedMethod === 'git') {
             if (curSyncMethod !== 'git') return true;
             const g = _readGitFields();
@@ -8423,6 +8448,24 @@ function openSettingsModal(initialTab) {
             try { _updateHistoryBtn(); } catch (_) {}
           } catch (e) {
             toast('Git 同步切换失败：' + _zhSyncError(e?.message || e), 'error');
+            return;
+          }
+        } else if (selectedMethod === 'dropbox') {
+          const dk = (body.querySelector('#set-dropbox-appkey')?.value || '').trim();
+          if (!dk) { toast('请先填写 Dropbox App Key（创建应用后可获得）', 'warning'); return; }
+          if (!window.dropboxTransport || !window.dropboxTransport.isConnected()) {
+            toast('请先点「连接 Dropbox」完成授权', 'warning'); return;
+          }
+          try {
+            storage.setSetting('dropbox_appKey', dk);
+            await storage.switchSyncMethod('dropbox', { autoStart: false });
+            _setCloudSyncDot('syncing', 'heavy');
+            await window.webdavSync.loadConfig();
+            await window.webdavSync.startAutoSync();
+            try { window.realtime?.applyConfig(); } catch (_) {}
+            toast('已切换到 Dropbox 同步（加密存储 · 变更秒级检测）', 'success');
+          } catch (e) {
+            toast('Dropbox 同步切换失败：' + _zhSyncError(e?.message || e), 'error');
             return;
           }
         } else {
@@ -8603,7 +8646,7 @@ function openSettingsModal(initialTab) {
     // 状态只属于「当前已保存、正在用的那家服务商」：
     //   下拉切到别家 / 关闭同步 / 本机本来就没开同步 → 框内状态藏起，避免误把旧账号的「已同步」贴到新选项上。
     const savedMethod = storage.getSetting('syncMethod') || 'none';
-    const savedProvider = savedMethod === 'webdav' ? (storage.getSetting('webdavProvider') || 'none') : (savedMethod === 'git' ? 'git' : 'none');
+    const savedProvider = savedMethod === 'webdav' ? (storage.getSetting('webdavProvider') || 'none') : (savedMethod === 'git' ? 'git' : (savedMethod === 'dropbox' ? 'dropbox' : 'none'));
     const sel = syncMethodSelect.value;
     const live = sel !== 'none' && sel === savedProvider;
     el.hidden = !live;
@@ -8706,13 +8749,28 @@ function openSettingsModal(initialTab) {
     const v = syncMethodSelect.value;
     const wasWebdav = _lastSyncSelect !== 'none';
     const panelGit = body.querySelector('#sync-panel-git');
-    if (v === 'none' || v === 'git') {
+    const panelDropbox = body.querySelector('#sync-panel-dropbox');
+    if (v === 'none') {
       if (wasWebdav) _stashWebdavDraft();
       panelWebdav.classList.add('settings-tab-hidden');
-      if (panelGit) panelGit.classList.toggle('settings-tab-hidden', v !== 'git');
+      if (panelGit) panelGit.classList.add('settings-tab-hidden');
+      if (panelDropbox) panelDropbox.classList.add('settings-tab-hidden');
       if (syncActionsWrap) syncActionsWrap.classList.add('settings-tab-hidden');
+    } else if (v === 'git') {
+      if (wasWebdav) _stashWebdavDraft();
+      panelWebdav.classList.add('settings-tab-hidden');
+      if (panelGit) panelGit.classList.remove('settings-tab-hidden');
+      if (panelDropbox) panelDropbox.classList.add('settings-tab-hidden');
+      if (syncActionsWrap) syncActionsWrap.classList.add('settings-tab-hidden');
+    } else if (v === 'dropbox') {
+      if (wasWebdav) _stashWebdavDraft();
+      panelWebdav.classList.add('settings-tab-hidden');
+      if (panelGit) panelGit.classList.add('settings-tab-hidden');
+      if (panelDropbox) panelDropbox.classList.remove('settings-tab-hidden');
+      if (syncActionsWrap) syncActionsWrap.classList.remove('settings-tab-hidden');
     } else {
       if (panelGit) panelGit.classList.add('settings-tab-hidden');
+      if (panelDropbox) panelDropbox.classList.add('settings-tab-hidden');
       panelWebdav.classList.remove('settings-tab-hidden');
       if (syncActionsWrap) syncActionsWrap.classList.remove('settings-tab-hidden');
       _switchWebdavProvider(v).then(() => {
@@ -8736,7 +8794,7 @@ function openSettingsModal(initialTab) {
   // 「立即同步 / 管理云端笔记」作用于已保存的配置，未保存时操作会指向旧服务商，需先拦截避免误解。
   function _hasUnsavedSyncChange() {
     const savedMethod = storage.getSetting('syncMethod') || 'none';
-    const savedProvider = savedMethod === 'webdav' ? (storage.getSetting('webdavProvider') || 'none') : (savedMethod === 'git' ? 'git' : 'none');
+    const savedProvider = savedMethod === 'webdav' ? (storage.getSetting('webdavProvider') || 'none') : (savedMethod === 'git' ? 'git' : (savedMethod === 'dropbox' ? 'dropbox' : 'none'));
     const sel = syncMethodSelect.value;
     if (sel !== savedProvider) return true;
     if (sel === 'git') {
@@ -8802,6 +8860,42 @@ function openSettingsModal(initialTab) {
       if (st) { st.textContent = '✗ ' + _zhSyncError(e?.message || e) + '（检查地址/认证/服务器跨域配置）'; st.className = 'sync-inline-msg err'; }
     } finally { gitTestBtn.disabled = false; gitTestBtn.textContent = old; }
   });
+
+  // Dropbox 面板：连接/断开授权 + 状态显示
+  function _paintDropboxPanel() {
+    const st = body.querySelector('#dropbox-sync-status');
+    if (!st) return;
+    const connected = window.dropboxTransport && window.dropboxTransport.isConnected();
+    if (connected) {
+      st.textContent = '✓ 已授权' + (window.dropboxTransport.authAccountId() ? ' · 账号 ' + window.dropboxTransport.authAccountId() : '');
+      st.className = 'sync-inline-msg ok';
+    } else {
+      st.textContent = '尚未授权：填好 App Key 后点「连接 Dropbox」';
+      st.className = 'sync-inline-msg';
+    }
+  }
+  body.querySelector('#set-dropbox-connect')?.addEventListener('click', async () => {
+    const st = body.querySelector('#dropbox-sync-status');
+    const dk = (body.querySelector('#set-dropbox-appkey')?.value || '').trim();
+    if (!dk) { if (st) { st.textContent = '请先填写 App Key'; st.className = 'sync-inline-msg err'; } return; }
+    try {
+      await window.dropboxTransport.authorize();
+      if (st) { st.textContent = '授权弹窗已打开：在 Dropbox 页面点击允许，本页会自动接收结果'; st.className = 'sync-inline-msg'; }
+    } catch (e) {
+      if (st) { st.textContent = '✗ ' + (e && e.message || e); st.className = 'sync-inline-msg err'; }
+    }
+  });
+  body.querySelector('#set-dropbox-disconnect')?.addEventListener('click', () => {
+    window.dropboxTransport?.disconnect();
+    _paintDropboxPanel();
+    toast('已清除 Dropbox 授权', 'info');
+  });
+  window.addEventListener('dropbox-auth-ok', () => { _paintDropboxPanel(); });
+  window.addEventListener('dropbox-auth-fail', (ev) => {
+    const st = body.querySelector('#dropbox-sync-status');
+    if (st) { st.textContent = '✗ 授权失败：' + (ev.detail || ''); st.className = 'sync-inline-msg err'; }
+  });
+  _paintDropboxPanel();
 
   // 读取代理 UI 的存储语义值：'' = 内置默认代理；'direct' = 直连；其余 = 自定义地址
   function _readProxySetting() {

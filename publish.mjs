@@ -142,6 +142,11 @@ if (existsSync(join(SRC, 'fonts'))) {
 for (const f of ['qrcode.min.js']) {
   if (existsSync(join(SRC, f))) writeFileSync(join(webDir, f), readFileSync(join(SRC, f)));
 }
+// Dropbox OAuth 回调页：授权弹窗的固定重定向地址（官方域名登记用），随站点分发
+if (existsSync(join(SRC, 'web', 'dropbox-oauth.html'))) {
+  writeFileSync(join(webDir, 'dropbox-oauth.html'), readFileSync(join(SRC, 'web', 'dropbox-oauth.html')));
+  console.log('  Dropbox 回调页 → web/dropbox-oauth.html');
+}
 console.log(`  网页版输出 → ${webDir}（含 sw.js / manifest / icon / whats-new.json）`);
 
 const finalSize = Buffer.byteLength(output, 'utf8');
