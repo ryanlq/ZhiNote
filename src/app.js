@@ -8878,9 +8878,12 @@ function openSettingsModal(initialTab) {
     const st = body.querySelector('#dropbox-sync-status');
     const dk = (body.querySelector('#set-dropbox-appkey')?.value || '').trim();
     if (!dk) { if (st) { st.textContent = '请先填写 App Key'; st.className = 'sync-inline-msg err'; } return; }
+    // 关键：先把输入框里的 App Key 落盘并注入 transport（否则 authorize 读的是旧配置，报“未填 Key”）
+    storage.setSetting('dropbox_appKey', dk);
+    window.dropboxTransport?.configure({ appKey: dk });
     try {
       await window.dropboxTransport.authorize();
-      if (st) { st.textContent = '授权弹窗已打开：在 Dropbox 页面点击允许，本页会自动接收结果'; st.className = 'sync-inline-msg'; }
+      if (st) { st.textContent = '授权弹窗已打开：在 Dropbox 页面点击允许，本页会自动接收结果；完成后记得点「保存」启用同步'; st.className = 'sync-inline-msg'; }
     } catch (e) {
       if (st) { st.textContent = '✗ ' + (e && e.message || e); st.className = 'sync-inline-msg err'; }
     }
@@ -8948,6 +8951,21 @@ function openSettingsModal(initialTab) {
 
   // 测试连接
   body.querySelector('#set-webdav-test').addEventListener('click', async () => {
+    // Dropbox 模式：验证授权令牌可用性（而非 WebDAV 字段）
+    if (syncMethodSelect.value === 'dropbox') {
+      if (!window.dropboxTransport || !window.dropboxTransport.isConnected()) {
+        webdavStatus.innerHTML = '<span style="color:var(--danger)">尚未连接 Dropbox：先填 App Key 并点「连接 Dropbox」</span>';
+        return;
+      }
+      webdavStatus.innerHTML = '<span style="color:var(--text-tertiary)">⏳ 测试中…</span>';
+      try {
+        await window.dropboxTransport.ensureToken();
+        webdavStatus.innerHTML = '<span class="ok">✓ Dropbox 授权有效，可启用同步</span>';
+      } catch (e) {
+        webdavStatus.innerHTML = '<span style="color:var(--danger)">✗ ' + (e && e.message || '授权失效，请重新连接 Dropbox') + '</span>';
+      }
+      return;
+    }
     const url = urlInput.value.trim();
     const user = body.querySelector('#set-webdav-user').value.trim();
     const pass = body.querySelector('#set-webdav-pass').value;
