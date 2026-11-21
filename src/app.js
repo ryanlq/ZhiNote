@@ -8004,6 +8004,7 @@ function openSettingsModal(initialTab) {
     <div style="font-size:12px;color:var(--text-tertiary);margin-top:14px;line-height:1.6;">
       · 设置步骤：Dropbox App Console 创建应用（访问类型选 <b>App folder</b>，作用域含 files.read/write）→ 添加重定向地址<br>
         <code>https://zhinote.shumu.de5.net/dropbox-oauth</code>（再加一条 <code>.../dropbox-oauth.html</code> 更保险）→ 把 <b>App Key</b> 粘贴到上方 → 点「连接 Dropbox」；<br>
+      · <b>App Key 位置</b>：App Console → 你创建的应用 → Settings 页顶部，约 15 位字母数字（不是下方 "Generated access token" 按钮生成的长令牌）；<br>
       · 笔记<b>加密后存储</b>，Dropbox 服务器只见密文；远端变更<b>秒级检测</b>（长轮询）；<br>
       · 大陆网络：授权弹窗需能访问 Dropbox（仅此一次）；之后的同步 API 自动走上方「跨域代理」转发；<br>
       · 授权令牌只保存在本机，不上云不同步——换设备需重新连接。
@@ -8886,6 +8887,16 @@ function openSettingsModal(initialTab) {
       if (st) { st.textContent = '授权弹窗已打开：在 Dropbox 页面点击允许，本页会自动接收结果；完成后记得点「保存」启用同步'; st.className = 'sync-inline-msg'; }
     } catch (e) {
       if (st) { st.textContent = '✗ ' + (e && e.message || e); st.className = 'sync-inline-msg err'; }
+    }
+  });
+  // 输入时即时提示：填了令牌（sl.u. 开头/超长）而非 App Key 就提前提醒，不打等报错
+  body.querySelector('#set-dropbox-appkey')?.addEventListener('input', (ev) => {
+    const st = body.querySelector('#dropbox-sync-status');
+    const v = (ev.target.value || '').trim();
+    if (!st) return;
+    if (v.length > 32 || /(^sl\.|[.:@/])/.test(v)) {
+      st.textContent = '⚠ 这看起来是 access token（长串），不是 App Key——App Key 在 App Console「Settings」页顶部，约 15 位字母数字';
+      st.className = 'sync-inline-msg err';
     }
   });
   body.querySelector('#set-dropbox-disconnect')?.addEventListener('click', () => {

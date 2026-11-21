@@ -277,6 +277,12 @@
   }
   function authorize() {
     if (!_cfg.appKey) { const e = new Error('请先填写 Dropbox App Key'); e.authFail = true; throw e; }
+    // 格式预检：App Key 是 App Console「Settings」页顶部的短字符串（约 15 位字母数字）；
+    // sl.u. 开头的长串是「Generated access token」（临时令牌），不是 App Key——填了会被 Dropbox 拒绝 Invalid client_id
+    if (_cfg.appKey.length > 32 || /[.:@/]/.test(_cfg.appKey) || /^sl\./i.test(_cfg.appKey)) {
+      const e = new Error('这看起来不是 App Key（像是 access token）：请回 Dropbox App Console → Settings 页顶部，复制那个约 15 位的 App Key');
+      e.authFail = true; throw e;
+    }
     const raw = new Uint8Array(32);
     crypto.getRandomValues(raw);
     _verifier = _b64url(raw);
