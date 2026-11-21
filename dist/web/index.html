@@ -82912,7 +82912,7 @@ window.storage = storage;
   var CONTENT = 'https://content.dropboxapi.com/2';
   var AUTHZ = 'https://www.dropbox.com/oauth2/authorize';
   var TOKEN_URL = 'https://api.dropboxapi.com/oauth2/token';
-  var CALLBACK_PATH = '/dropbox-oauth.html';            // 需在 Dropbox App 后台登记的重定向地址
+  var CALLBACK_PATH = '/dropbox-oauth';                  // 需在 Dropbox App 后台登记的重定向地址（CF 会剥掉 .html，故用无扩展名形式）
   var FALLBACK_ORIGIN = 'https://zhinote.shumu.de5.net'; // file:// 等无源宿主时用官方回调
 
   var LS_KEY = 'zhinote-dropbox-auth';
@@ -83152,9 +83152,9 @@ window.storage = storage;
     return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
   function _redirectUri() {
-    try {
-      if (location.protocol === 'http:' || location.protocol === 'https:') return location.origin + CALLBACK_PATH;
-    } catch (_) {}
+    // 统一用官方回调页（已登记、支持无扩展名直出，postMessage 跨源回传）：
+    // 授权弹窗本来就需能访问 www.dropbox.com，回调页同域无额外负担；
+    // 自建 App 的用户在 App 后台登记同一条 URI 即可。
     return FALLBACK_ORIGIN + CALLBACK_PATH;
   }
   function authorize() {
@@ -114684,7 +114684,7 @@ function openSettingsModal(initialTab) {
     <div id="dropbox-sync-status" class="sync-inline-msg"></div>
     <div style="font-size:12px;color:var(--text-tertiary);margin-top:14px;line-height:1.6;">
       · 设置步骤：Dropbox App Console 创建应用（访问类型选 <b>App folder</b>，作用域含 files.read/write）→ 添加重定向地址<br>
-        <code>${(location.protocol==='file:'||location.origin==='null')?'https://zhinote.shumu.de5.net':location.origin}/dropbox-oauth.html</code> → 把 <b>App Key</b> 粘贴到上方 → 点「连接 Dropbox」；<br>
+        <code>https://zhinote.shumu.de5.net/dropbox-oauth</code>（再加一条 <code>.../dropbox-oauth.html</code> 更保险）→ 把 <b>App Key</b> 粘贴到上方 → 点「连接 Dropbox」；<br>
       · 笔记<b>加密后存储</b>，Dropbox 服务器只见密文；远端变更<b>秒级检测</b>（长轮询）；<br>
       · 大陆网络：授权弹窗需能访问 Dropbox（仅此一次）；之后的同步 API 自动走上方「跨域代理」转发；<br>
       · 授权令牌只保存在本机，不上云不同步——换设备需重新连接。

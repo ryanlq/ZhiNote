@@ -30,7 +30,7 @@
   var CONTENT = 'https://content.dropboxapi.com/2';
   var AUTHZ = 'https://www.dropbox.com/oauth2/authorize';
   var TOKEN_URL = 'https://api.dropboxapi.com/oauth2/token';
-  var CALLBACK_PATH = '/dropbox-oauth.html';            // 需在 Dropbox App 后台登记的重定向地址
+  var CALLBACK_PATH = '/dropbox-oauth';                  // 需在 Dropbox App 后台登记的重定向地址（CF 会剥掉 .html，故用无扩展名形式）
   var FALLBACK_ORIGIN = 'https://zhinote.shumu.de5.net'; // file:// 等无源宿主时用官方回调
 
   var LS_KEY = 'zhinote-dropbox-auth';
@@ -270,9 +270,9 @@
     return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
   function _redirectUri() {
-    try {
-      if (location.protocol === 'http:' || location.protocol === 'https:') return location.origin + CALLBACK_PATH;
-    } catch (_) {}
+    // 统一用官方回调页（已登记、支持无扩展名直出，postMessage 跨源回传）：
+    // 授权弹窗本来就需能访问 www.dropbox.com，回调页同域无额外负担；
+    // 自建 App 的用户在 App 后台登记同一条 URI 即可。
     return FALLBACK_ORIGIN + CALLBACK_PATH;
   }
   function authorize() {

@@ -8003,7 +8003,7 @@ function openSettingsModal(initialTab) {
     <div id="dropbox-sync-status" class="sync-inline-msg"></div>
     <div style="font-size:12px;color:var(--text-tertiary);margin-top:14px;line-height:1.6;">
       · 设置步骤：Dropbox App Console 创建应用（访问类型选 <b>App folder</b>，作用域含 files.read/write）→ 添加重定向地址<br>
-        <code>${(location.protocol==='file:'||location.origin==='null')?'https://zhinote.shumu.de5.net':location.origin}/dropbox-oauth.html</code> → 把 <b>App Key</b> 粘贴到上方 → 点「连接 Dropbox」；<br>
+        <code>https://zhinote.shumu.de5.net/dropbox-oauth</code>（再加一条 <code>.../dropbox-oauth.html</code> 更保险）→ 把 <b>App Key</b> 粘贴到上方 → 点「连接 Dropbox」；<br>
       · 笔记<b>加密后存储</b>，Dropbox 服务器只见密文；远端变更<b>秒级检测</b>（长轮询）；<br>
       · 大陆网络：授权弹窗需能访问 Dropbox（仅此一次）；之后的同步 API 自动走上方「跨域代理」转发；<br>
       · 授权令牌只保存在本机，不上云不同步——换设备需重新连接。
