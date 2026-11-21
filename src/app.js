@@ -2319,7 +2319,8 @@ function _confirmReencryptCloud() {
 /** 覆盖导入/恢复前：若开启了云同步，先确认（会同时覆盖云端）。未开同步直接放行。返回是否继续。 */
 function _confirmOverwriteCloudIfSync() {
   const _m = storage.getSetting('syncMethod') || 'none';
-  if (_m !== 'webdav' && _m !== 'dropbox') return Promise.resolve(true);
+  if (_m !== 'webdav' && _m !== 'dropbox' && _m !== 'relay') return Promise.resolve(true);
+  if (_m === 'relay') return Promise.resolve(true);   // 实时云：无外部云端可覆盖，realtime 会把新状态推给在线对端
   return new Promise((resolve) => {
     const body = document.createElement('div');
     body.style.cssText = 'padding:4px 0;color:var(--text);font-size:14px;line-height:1.7;';
@@ -2341,6 +2342,10 @@ function _confirmOverwriteCloudIfSync() {
 /** 覆盖导入/恢复完成后：若开启云同步，用本地（导入后的结果）镜像覆盖云端，避免被替换的旧笔记从云端复活。 */
 async function _mirrorAfterOverwrite() {
   const _m = storage.getSetting('syncMethod') || 'none';
+  if (_m === 'relay' && window.realtime?.snapshotSaveNow) {
+    setTimeout(function () { try { window.realtime.snapshotSaveNow(); } catch (_) {} }, 1500);   // 实时云：覆盖后落一份新快照
+    return;
+  }
   if ((_m !== 'webdav' && _m !== 'dropbox') || !window.webdavSync?.mirrorLocalToCloud) return;
   try {
     editor.flushSave?.();
@@ -4363,6 +4368,7 @@ function handleQuickerMessage(msg) {
           if ((_m === 'webdav' || _m === 'dropbox') && window.webdavSync?.wakeGet) {
             window.webdavSync.wakeGet({ force: true });
           }
+          if (_m === 'relay' && window.realtime?.notifyShown) window.realtime.notifyShown();   // 实时云：聚焦即重连+接力
         } catch (_) {}
       }, 100);
       break;
@@ -7864,6 +7870,7 @@ function openSettingsModal(initialTab) {
       <option value="custom" ${curSyncMethod==='webdav'&&curProvider==='custom'?'selected':''} title="自行搭建或其他支持 WebDAV 的服务">自定义 WebDAV</option>
       <option value="git" ${curSyncMethod==='git'?'selected':''} title="自建 Git 仓库（明文存储）· 完整版本历史 · 支持任意时点回滚">Git 仓库（自建 · 版本历史）</option>
       <option value="dropbox" ${curSyncMethod==='dropbox'?'selected':''} title="Dropbox 云盘 · 笔记加密后存储 · 变更秒级检测（大陆网络需代理转发 API）">Dropbox（加密存储）</option>
+      <option value="relay" ${curSyncMethod==='relay'?'selected':''} title="口令直连 · 无需网盘 · 两台设备填同一口令即互相同步 · 数据加密快照存中继">实时云（无需网盘）</option>
       <option value="none" ${curSyncMethod==='none'?'selected':''} title="关闭所有云端同步，仅本地保存">关闭同步</option>
     </select>
     <div id="sync-actions-wrap" class="${curSyncMethod==='none'?'settings-tab-hidden':''}">
@@ -8008,6 +8015,28 @@ function openSettingsModal(initialTab) {
       · 笔记<b>加密后存储</b>，Dropbox 服务器只见密文；远端变更<b>秒级检测</b>（长轮询）；<br>
       · 大陆网络：授权弹窗需能访问 Dropbox（仅此一次）；之后的同步 API 自动走上方「跨域代理」转发；<br>
       · 授权令牌只保存在本机，不上云不同步——换设备需重新连接。
+    </div>
+    </div>
+    <div id="sync-panel-relay" class="sync-panel ${curSyncMethod==='relay'?'':'settings-tab-hidden'}">
+    <label>同步口令（两台设备填同一口令即可互相同步）</label>
+    <div class="pass-input-wrap" style="position:relative;">
+      <input type="password" id="set-relay-pass" placeholder="至少 6 位，只存本机" autocomplete="new-password" style="width:100%;padding-right:36px;">
+      <button type="button" id="set-relay-pass-eye" class="pass-eye-btn" title="显示/隐藏密码">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+      </button>
+    </div>
+    <label style="margin-top:14px;">空间别名（不同别名 = 不同步空间）</label>
+    <input type="text" id="set-relay-alias" placeholder="cloud" value="${escapeHtml(storage.getSetting('relay_alias')||'cloud')}" style="width:100%;">
+    <div class="sync-actions-row" style="margin-top:14px;">
+      <button type="button" id="set-relay-enable" class="sync-act-btn primary" title="启用实时云同步">启用实时云</button>
+      <button type="button" id="set-relay-restore" class="sync-act-btn" title="从实时云快照恢复整库（本地为空时自动恢复）">从云端恢复</button>
+    </div>
+    <div id="relay-sync-status" class="sync-inline-msg"></div>
+    <div style="font-size:12px;color:var(--text-tertiary);margin-top:14px;line-height:1.6;">
+      · <b>无需网盘</b>：两台设备填同一口令 + 同一别名，在线即秒级互相同步（正文与结构都走加密直推）；<br>
+      · <b>离线兜底</b>：整库加密快照自动存中继（保留最近 5 份），新设备/清空后自动引导恢复；<br>
+      · <b>隐私</b>：快照是口令加密后的密文，中继只见不透明字节；<br>
+      · <b>边界</b>：图片暂不随快照恢复；重要资料建议定期导出备份；恢复会整库替换本地（自动留底可找回）。
     </div>
     </div>
     </div>
@@ -8348,6 +8377,12 @@ function openSettingsModal(initialTab) {
             const dk = (body.querySelector('#set-dropbox-appkey')?.value || '').trim();
             return dk !== (storage.getSetting('dropbox_appKey') || '');
           }
+          if (selectedMethod === 'relay') {
+            if (curSyncMethod !== 'relay') return true;
+            const rp = (body.querySelector('#set-relay-pass')?.value || '').trim();
+            const ra = (body.querySelector('#set-relay-alias')?.value || '').trim() || 'cloud';
+            return rp !== (storage.getSetting('webdavCryptoPass') || '') || ra !== (storage.getSetting('relay_alias') || 'cloud');
+          }
           if (selectedMethod === 'git') {
             if (curSyncMethod !== 'git') return true;
             const g = _readGitFields();
@@ -8467,6 +8502,22 @@ function openSettingsModal(initialTab) {
             toast('已切换到 Dropbox 同步（加密存储 · 变更秒级检测）', 'success');
           } catch (e) {
             toast('Dropbox 同步切换失败：' + _zhSyncError(e?.message || e), 'error');
+            return;
+          }
+        } else if (selectedMethod === 'relay') {
+          const rp = (body.querySelector('#set-relay-pass')?.value || '').trim();
+          const ra = (body.querySelector('#set-relay-alias')?.value || '').trim() || 'cloud';
+          if (!rp || rp.length < 6) { toast('请设置同步口令（至少 6 位，两台设备填同一口令）', 'warning'); return; }
+          try {
+            storage.setSetting('webdavCryptoPass', rp);
+            storage.setSetting('relay_alias', ra);
+            await storage.switchSyncMethod('relay', { autoStart: false });
+            try { window.realtime?.applyConfig(); } catch (_) {}
+            try { window.realtime?.snapshotSaveNow && window.realtime.snapshotSaveNow(); } catch (_) {}
+            toast('已启用实时云（口令直连 · 无需网盘 · 快照自动留存）', 'success');
+            closeModal();
+          } catch (e) {
+            toast('实时云切换失败：' + _zhSyncError(e?.message || e), 'error');
             return;
           }
         } else {
@@ -8647,7 +8698,7 @@ function openSettingsModal(initialTab) {
     // 状态只属于「当前已保存、正在用的那家服务商」：
     //   下拉切到别家 / 关闭同步 / 本机本来就没开同步 → 框内状态藏起，避免误把旧账号的「已同步」贴到新选项上。
     const savedMethod = storage.getSetting('syncMethod') || 'none';
-    const savedProvider = savedMethod === 'webdav' ? (storage.getSetting('webdavProvider') || 'none') : (savedMethod === 'git' ? 'git' : (savedMethod === 'dropbox' ? 'dropbox' : 'none'));
+    const savedProvider = savedMethod === 'webdav' ? (storage.getSetting('webdavProvider') || 'none') : (savedMethod === 'git' ? 'git' : (savedMethod === 'dropbox' ? 'dropbox' : (savedMethod === 'relay' ? 'relay' : 'none')));
     const sel = syncMethodSelect.value;
     const live = sel !== 'none' && sel === savedProvider;
     el.hidden = !live;
@@ -8751,11 +8802,13 @@ function openSettingsModal(initialTab) {
     const wasWebdav = _lastSyncSelect !== 'none';
     const panelGit = body.querySelector('#sync-panel-git');
     const panelDropbox = body.querySelector('#sync-panel-dropbox');
+  const panelRelay = body.querySelector('#sync-panel-relay');
     if (v === 'none') {
       if (wasWebdav) _stashWebdavDraft();
       panelWebdav.classList.add('settings-tab-hidden');
       if (panelGit) panelGit.classList.add('settings-tab-hidden');
       if (panelDropbox) panelDropbox.classList.add('settings-tab-hidden');
+      if (panelRelay) panelRelay.classList.add('settings-tab-hidden');
       if (syncActionsWrap) syncActionsWrap.classList.add('settings-tab-hidden');
     } else if (v === 'git') {
       if (wasWebdav) _stashWebdavDraft();
@@ -8768,7 +8821,15 @@ function openSettingsModal(initialTab) {
       panelWebdav.classList.add('settings-tab-hidden');
       if (panelGit) panelGit.classList.add('settings-tab-hidden');
       if (panelDropbox) panelDropbox.classList.remove('settings-tab-hidden');
+      if (panelRelay) panelRelay.classList.add('settings-tab-hidden');
       if (syncActionsWrap) syncActionsWrap.classList.remove('settings-tab-hidden');
+    } else if (v === 'relay') {
+      if (wasWebdav) _stashWebdavDraft();
+      panelWebdav.classList.add('settings-tab-hidden');
+      if (panelGit) panelGit.classList.add('settings-tab-hidden');
+      if (panelDropbox) panelDropbox.classList.add('settings-tab-hidden');
+      if (panelRelay) panelRelay.classList.remove('settings-tab-hidden');
+      if (syncActionsWrap) syncActionsWrap.classList.add('settings-tab-hidden');
     } else {
       if (panelGit) panelGit.classList.add('settings-tab-hidden');
       if (panelDropbox) panelDropbox.classList.add('settings-tab-hidden');
@@ -8795,7 +8856,7 @@ function openSettingsModal(initialTab) {
   // 「立即同步 / 管理云端笔记」作用于已保存的配置，未保存时操作会指向旧服务商，需先拦截避免误解。
   function _hasUnsavedSyncChange() {
     const savedMethod = storage.getSetting('syncMethod') || 'none';
-    const savedProvider = savedMethod === 'webdav' ? (storage.getSetting('webdavProvider') || 'none') : (savedMethod === 'git' ? 'git' : (savedMethod === 'dropbox' ? 'dropbox' : 'none'));
+    const savedProvider = savedMethod === 'webdav' ? (storage.getSetting('webdavProvider') || 'none') : (savedMethod === 'git' ? 'git' : (savedMethod === 'dropbox' ? 'dropbox' : (savedMethod === 'relay' ? 'relay' : 'none')));
     const sel = syncMethodSelect.value;
     if (sel !== savedProvider) return true;
     if (sel === 'git') {
@@ -8910,6 +8971,64 @@ function openSettingsModal(initialTab) {
     if (st) { st.textContent = '✗ 授权失败：' + (ev.detail || ''); st.className = 'sync-inline-msg err'; }
   });
   _paintDropboxPanel();
+
+  // 实时云面板：启用 / 从云端恢复 / 状态显示
+  function _paintRelayPanel() {
+    const st = body.querySelector('#relay-sync-status');
+    if (!st) return;
+    const on = window.realtime && window.realtime.isOn && window.realtime.isOn();
+    if (on) {
+      let snapInfo = '';
+      try {
+        window.realtime.snapshotList().then(function (list) {
+          const done = (list || []).filter(function (s) { return s.done; });
+          if (st && done.length) {
+            const last = done[0];
+            st.textContent = '✓ 实时云已启用 · 云端快照 ' + done.length + ' 份 · 最新 ' + new Date(last.ts).toLocaleString();
+          }
+        }).catch(function () {});
+        snapInfo = '检查快照中…';
+      } catch (_) {}
+      st.textContent = '✓ 实时云已启用' + (snapInfo ? ' · ' + snapInfo : '');
+      st.className = 'sync-inline-msg ok';
+    } else {
+      st.textContent = '尚未启用：设置口令后点「启用实时云」；两台设备填同一口令即可互相同步';
+      st.className = 'sync-inline-msg';
+    }
+  }
+  body.querySelector('#set-relay-pass-eye')?.addEventListener('click', () => {
+    const inp = body.querySelector('#set-relay-pass');
+    if (inp) inp.type = inp.type === 'password' ? 'text' : 'password';
+  });
+  body.querySelector('#set-relay-enable')?.addEventListener('click', async () => {
+    const st = body.querySelector('#relay-sync-status');
+    const rp = (body.querySelector('#set-relay-pass')?.value || '').trim();
+    const ra = (body.querySelector('#set-relay-alias')?.value || '').trim() || 'cloud';
+    if (!rp || rp.length < 6) { if (st) { st.textContent = '✗ 请设置同步口令（至少 6 位）'; st.className = 'sync-inline-msg err'; } return; }
+    try {
+      storage.setSetting('webdavCryptoPass', rp);
+      storage.setSetting('relay_alias', ra);
+      await storage.switchSyncMethod('relay', { autoStart: false });
+      try { window.realtime?.applyConfig(); } catch (_) {}
+      try { window.realtime?.snapshotSaveNow && await window.realtime.snapshotSaveNow(); } catch (_) {}
+      _paintRelayPanel();
+      toast('已启用实时云（口令直连 · 无需网盘）', 'success');
+    } catch (e) {
+      if (st) { st.textContent = '✗ 启用失败：' + (e && e.message || e); st.className = 'sync-inline-msg err'; }
+    }
+  });
+  body.querySelector('#set-relay-restore')?.addEventListener('click', async () => {
+    const st = body.querySelector('#relay-sync-status');
+    try {
+      if (st) { st.textContent = '⏳ 正在从实时云恢复…'; st.className = 'sync-inline-msg'; }
+      const okr = await window.realtime.snapshotRestore(false);
+      if (okr) _paintRelayPanel();
+      else if (st) { st.textContent = '云端没有可恢复的快照'; st.className = 'sync-inline-msg err'; }
+    } catch (e) {
+      if (st) { st.textContent = '✗ 恢复失败：' + (e && e.message || e); st.className = 'sync-inline-msg err'; }
+    }
+  });
+  _paintRelayPanel();
 
   // 读取代理 UI 的存储语义值：'' = 内置默认代理；'direct' = 直连；其余 = 自定义地址
   function _readProxySetting() {

@@ -3041,6 +3041,9 @@ const storage = (() => {
           if (config.webdavPass) setSetting(pk + 'pass', config.webdavPass);
         }
       }
+      if (method === 'relay') {
+        if (config.relayAlias !== undefined) setSetting('relay_alias', String(config.relayAlias).trim() || 'cloud');
+      }
       if (method === 'git') {
         if (config.gitUrl) setSetting('gitUrl', config.gitUrl);
         if (config.gitUser) setSetting('gitUser', config.gitUser);
@@ -3054,9 +3057,9 @@ const storage = (() => {
 
       if (config && config.autoStart === false) return;
 
-      if ((method === 'webdav' || method === 'dropbox') && window.webdavSync) {
+      if ((method === 'webdav' || method === 'dropbox' || method === 'relay') && window.webdavSync) {
         await window.webdavSync.loadConfig();
-        window.webdavSync.startAutoSync();
+        if (method !== 'relay') window.webdavSync.startAutoSync();   // relay：只加载配置供房间号/加解密派生，网盘轮询不启动
       }
       if (method === 'git' && window.gitSync) {
         await window.gitSync.loadConfig();
@@ -3088,11 +3091,11 @@ const storage = (() => {
     'unsyncedParkedIds', // 久闲对云后放进回收站、尚未上云的本机独有篇
   ];
   // 'webdav_' 前缀=同步配置；'git_' 前缀=Git 同步配置；'_' 前缀=内部迁移标记，都只留本机
-  const LOCAL_ONLY_PREFIX = ['webdav_', 'git_', 'dropbox_', '_'];
+  const LOCAL_ONLY_PREFIX = ['webdav_', 'git_', 'dropbox_', 'relay_', '_'];
 
   function markDirty(reason) {
     const method = getSetting('syncMethod') || 'none';
-    if (method === 'none') return;
+    if (method === 'none' || method === 'relay') return;   // 实时云：realtime 由 change 事件直驱，无需计划任务
     if ((method === 'webdav' || method === 'dropbox') && window.webdavSync) {
       try {
         if (window.__MD_DEBUG__) {
@@ -3109,7 +3112,7 @@ const storage = (() => {
 
   async function flushBeforeHide() {
     const method = getSetting('syncMethod') || 'none';
-    if (method === 'none') return;
+    if (method === 'none' || method === 'relay') return;   // 实时云：realtime 由 change 事件直驱，无需计划任务
     if ((method === 'webdav' || method === 'dropbox') && window.webdavSync) {
       window.webdavSync.flushPutOnHide();
     }
@@ -3120,7 +3123,7 @@ const storage = (() => {
 
   async function startAutoSync() {
     const method = getSetting('syncMethod') || 'none';
-    if (method === 'none') return;
+    if (method === 'none' || method === 'relay') return;   // 实时云：realtime 由 change 事件直驱，无需计划任务
     if ((method === 'webdav' || method === 'dropbox') && window.webdavSync) {
       window.webdavSync.startAutoSync();
     }

@@ -204,9 +204,116 @@
   /** 即时同步是否「具备启用条件」：必须选了网盘且填了地址+用户名。
    *  关键（隐私/正确性）：房间号由「网盘账号 + 口令」哈希得出，未配网盘时账号为空，
    *  会让不同用户落入同一默认房间、互收对方加密结构（默认口令可解）。故无网盘一律不启用。 */
+  // ── 实时云快照（v2.2.11）：整库加密快照持久化到中继（保留最近 5 份），跨设备引导/恢复 ──
+  //   数据 = exportJSON（自动剔除口令/本机敏感项）→ LZ 压缩 → 口令加密 → 分块（600K 字符/块）。
+  //   恢复 = 中继逐块回传 → 重组 → 解密 → importJSON（自带迁移/结构总账重建/本机设置保留）。
+  //   已知边界：图片不随快照恢复（图片另有网盘通道）；建议重要资料仍定期导出备份。
+  const SNAP_CHUNK = 600000;
+  const SNAP_SAVE_DEBOUNCE = 90000;
+  const SNAP_MIN_INTERVAL = 600000;
+  let _snapSaveTimer = null;
+  let _lastSnapSave = 0;
+  let _lastSnapData = '';
+  let _snapPendingRes = null;   // 等待中继回包的收集器（list / get）
+  let _bootstrapped = false;
+  function _snapPlain() {
+    let plain = window.storage.exportJSON();
+    try { if (window.LZString && window.LZString.compressToBase64) {
+      const c = 'MDNOTE_LZB64:' + window.LZString.compressToBase64(plain);
+      if (c.length < plain.length) plain = c;
+    } } catch (_) {}
+    return plain;
+  }
+  function _snapReq(msg, withChunks, timeoutMs) {
+    return new Promise(function (resolve) {
+      _snapPendingRes = withChunks ? { chunks: {}, resolve: resolve } : { resolve: resolve };
+      _sigSend(msg);
+      setTimeout(function () { if (_snapPendingRes && _snapPendingRes.resolve === resolve) { _snapPendingRes = null; resolve(null); } }, timeoutMs || 10000);
+    });
+  }
+  function _onSnapReply(j) {
+    const p = _snapPendingRes;
+    if (j.__zr === 'snap-list') { if (p && p.resolve) { _snapPendingRes = null; p.resolve({ list: j.list || [] }); } return; }
+    if (j.__zr === 'snap-c') { if (p && p.chunks) p.chunks[j.i | 0] = j.b64 || ''; return; }
+    if (j.__zr === 'snap-done') { if (p && p.chunks) { const keys = Object.keys(p.chunks).sort(function (a, b) { return a - b; }); const data = keys.map(function (k) { return p.chunks[k]; }).join(''); _snapPendingRes = null; p.resolve({ data: data, ts: j.ts, size: j.size }); } return; }
+    if (j.__zr === 'snap-err') { if (p) { _snapPendingRes = null; p.resolve(null); } return; }
+  }
+  /** 立即把整库加密快照写往中继（保留最近 5 份）。fast=true 时不做分块间让步（离线前抢存）。 */
+  async function snapshotSaveNow(fast) {
+    if (!_enabled || !_sig || _sig.readyState !== 1) return false;
+    let cipher;
+    try { cipher = await window.webdavSync.rtEncrypt(_snapPlain()); } catch (e) { _D('快照加密失败', e); return false; }
+    if (cipher === _lastSnapData) { _D('快照未变，跳过'); return true; }
+    const seq = _sid + '-' + Date.now().toString(36);
+    const total = Math.max(1, Math.ceil(cipher.length / SNAP_CHUNK));
+    _sigSend({ __zr: 'snap-w', seq: seq, ts: Date.now(), total: total, size: cipher.length });
+    for (let i = 0; i < total; i++) {
+      _sigSend({ __zr: 'snap-c', seq: seq, i: i, b64: cipher.slice(i * SNAP_CHUNK, (i + 1) * SNAP_CHUNK) });
+      if (!fast && i % 3 === 2) await _sleep(30);
+    }
+    _sigSend({ __zr: 'snap-end', seq: seq });
+    _lastSnapSave = Date.now(); _lastSnapData = cipher;
+    _pulse();
+    _D('快照已保存', seq, '块', total);
+    return true;
+  }
+  async function snapshotList() {
+    if (!_sig || _sig.readyState !== 1) return [];
+    const r = await _snapReq({ __zr: 'snap-list-req' }, false, 10000);
+    return (r && r.list) || [];
+  }
+  /** 拉取并解密最新一份快照，返回明文（exportJSON/importJSON 兼容格式），无则 null。 */
+  async function _snapFetchLatest() {
+    const list = await snapshotList();
+    const done = list.filter(function (s) { return s.done; });
+    if (!done.length) return null;
+    const r = await _snapReq({ __zr: 'snap-get', seq: done[0].seq }, true, 30000);
+    if (!r || !r.data) return null;
+    try { return await window.webdavSync.rtDecrypt(r.data); } catch (e) { _D('快照解密失败', e); return null; }
+  }
+  /** 恢复：整库替换（importJSON 自带留底/迁移/本机设置保留）。silent=true 不弹 toast。 */
+  async function snapshotRestore(silent) {
+    if (!_sig || _sig.readyState !== 1) { if (!silent) toast('未连接实时云，无法恢复', 'warning'); return false; }
+    const plain = await _snapFetchLatest();
+    if (!plain) { if (!silent) toast('云端没有可恢复的快照', 'warning'); return false; }
+    await window.storage.importJSON(plain);
+    try { window.editor && window.editor.reloadCurrent && window.editor.reloadCurrent(); } catch (_) {}
+    if (!silent) toast('已从实时云恢复全部笔记', 'success');
+    _pulse();
+    return true;
+  }
+  function _snapScheduleSave() {
+    clearTimeout(_snapSaveTimer);
+    _snapSaveTimer = setTimeout(async function () {
+      if (!_enabled || _offline) return;
+      if (!_sig || _sig.readyState !== 1) return;
+      const since = Date.now() - _lastSnapSave;
+      if (_lastSnapSave && since < SNAP_MIN_INTERVAL) { clearTimeout(_snapSaveTimer); _snapSaveTimer = setTimeout(function () { _snapScheduleSave(); }, SNAP_MIN_INTERVAL - since); return; }
+      try { await snapshotSaveNow(false); } catch (_) {}
+    }, SNAP_SAVE_DEBOUNCE);
+  }
+  /** 首次引导：实时云已启用且本地全空 → 自动拉最新快照恢复（新设备输口令即用）。 */
+  function _maybeBootstrap() {
+    if (_bootstrapped || !_enabled) return;
+    const d = window.storage.getAll();
+    const n = Object.keys((d && d.notes) || {}).length + Object.keys((d && d.trash) || {}).length;
+    if (n > 0) { _bootstrapped = true; return; }
+    if (!_sig || _sig.readyState !== 1) return;
+    _bootstrapped = true;
+    (async function () {
+      const plain = await _snapFetchLatest();
+      if (!plain) return;
+      await window.storage.importJSON(plain);
+      try { window.editor && window.editor.reloadCurrent && window.editor.reloadCurrent(); } catch (_) {}
+      toast('已从实时云恢复全部笔记', 'success', { duration: 8000 });
+      _pulse();
+    })();
+  }
   function _webdavConfigured() {
     try {
-      if (window.storage.getSetting('syncMethod') !== 'webdav') return false;
+      const method = window.storage.getSetting('syncMethod') || 'none';
+      if (method === 'relay') return true;                 // 实时云：口令即身份（房间号含别名+口令），无需网盘
+      if (method !== 'webdav') return false;
       return !!((window.storage.getSetting('webdavUrl') || '').trim() && (window.storage.getSetting('webdavUser') || '').trim());
     } catch (_) { return false; }
   }
@@ -252,7 +359,7 @@
     if (!note) { _disconnect(); return; }
     let roomId;
     try { roomId = await window.webdavSync.rtRoomId((note.workspaceId || '') + ':' + id); }
-    catch (_) { return; }
+    catch (e) { try { window.__RT_ERR__ = String(e && e.message || e); } catch (_) {} return; }
     if (id !== _activeId) return;
     if (_ws && _roomId === roomId && _ws.readyState <= 1) return;
     _disconnect();
@@ -547,7 +654,7 @@
     // 账号级在场/结构房间：只按账号(网盘账号+口令)派生，与笔记本/笔记无关 →
     //   任意设备一上线就互相可见、任意笔记本的结构改动都即时送达每台在线设备。
     try { roomId = await window.webdavSync.rtRoomId(SIGNAL_SEED); }
-    catch (_) { return; }
+    catch (e) { try { window.__RT_ERR__ = String(e && e.message || e); } catch (_) {} _D("信令房间派生失败", e && e.message); return; }
     if (_sig && _sigRoomId === roomId && _sig.readyState <= 1) return;
     _sigDisconnect();
     _sigRoomId = roomId;
@@ -648,6 +755,9 @@
       _occSupported = true; _sigOcc = msg.n | 0; _prunePeers(); _notifyStatus();
       if (_sigOcc !== prevOcc) _resetSigSV();           // 有设备进出 → 账号级增量指纹作废，下次发全量（新设备没有前情）
       return;
+    }
+    if (msg.__zr === 'snap-list' || msg.__zr === 'snap-c' || msg.__zr === 'snap-done' || msg.__zr === 'snap-err') {
+      _onSnapReply(msg); return;                        // 快照回包 → 交给等待中的收集器
     }
     if (!msg || msg.sid === _sid) return;               // 忽略自己的回声
     if (msg.rt !== 'hb') _D('收到信令', msg.rt);          // 心跳太密不打印，其余都记
@@ -846,6 +956,7 @@
   function _onStorageChange(p) {
     if (!_enabled) return;
     if (!p) return;
+    _snapScheduleSave();                                 // 实时云快照：任何变更 90s 后落一份（最小间隔内部判）
     if (p.type === 'content') {
       if (_applyingRemote || p.id !== _activeId) return;
       _sendLocal(p.id);                                  // 正文改动 → 内容房间（同看对端走这条，自带「有人才发」门控）
@@ -891,6 +1002,7 @@
     clearTimeout(_byeTimer);
     const run = function () {
       _byeTimer = null;
+      try { if (_sig && _sig.readyState === 1) snapshotSaveNow(true); } catch (_) {}   // 离线前抢存快照（fast，socket 关闭前送出）
       _offline = true;
       try { _leaveSig(); } catch (_) {}                    // 礼貌告知对端（旧中转兜底）；新中转靠 socket 关闭即报
       _disconnect();                                        // 关内容房间
@@ -931,6 +1043,7 @@
     try { window.storage.on('change', _onStorageChange); } catch (_) {}
     applyConfig();
     try { setInterval(_watchdog, 6000); } catch (_) {}
+    try { setTimeout(function () { try { _maybeBootstrap(); } catch (_) {} }, 2500); } catch (_) {}
     try {
       const cur = window.editor && window.editor.currentId && window.editor.currentId();
       if (cur) onActiveNote(cur);
@@ -969,6 +1082,10 @@
     //   ① 前端 focus 事件兜底，② 宿主「显示窗口」动作里执行一行 window.realtime.notifyShown() 最可靠。两者都幂等。
     notifyHidden: function () { try { _hostHiddenAt = Date.now(); _goOffline({ immediate: true }); } catch (_) {} },
     notifyShown: function () { try { _goOnline(true); } catch (_) {} },
+    // 实时云快照：手动保存 / 恢复 / 列出（设置面板用）
+    snapshotSaveNow: function () { return snapshotSaveNow(true); },
+    snapshotRestore: function (silent) { return snapshotRestore(silent); },
+    snapshotList: function () { return snapshotList(); },
     /** 即时同步指示灯用：on=具备并已启用；connected=信令已连（断开即灭，诚实反映真实连接）；
      *  active=账号内有别的设备在场（服务器实报人数≥2，旧中转退回心跳）→ 紫点常亮；
      *  syncing=刚发/收过正文或结构（呼吸窗口内）→ 紫点呼吸；

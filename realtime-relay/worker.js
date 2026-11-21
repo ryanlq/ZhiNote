@@ -91,6 +91,14 @@ export class Room {
   }
 
   async webSocketMessage(ws, msg) {
+    // 控制消息（JSON 以 __zr 开头）：快照持久化协议（v2.2.11 起），服务端处理、不转发。
+    //   其余 JSON（如 __zn 内容信封）与密文/二进制照旧存储+转发，行为与旧版完全一致。
+    if (typeof msg === 'string' && msg.charCodeAt(0) === 123) {
+      try {
+        const j = JSON.parse(msg);
+        if (j && j.__zr && j.__zr !== 'occ') { await this._control(ws, j); return; }
+      } catch (_) {}   // 非 JSON（密文）→ 照旧
+    }
     // 中转对内容不透明：字符串（base64 密文）或二进制都原样转发。
     // 存一份最新快照（仅房间存活期间临时存，给后到的设备引导用）。
     // 超大快照不落库（仍正常实时转发），避免触碰单值存储上限。
@@ -109,6 +117,90 @@ export class Room {
         try { peer.send(msg); } catch (_) {}
       }
     }
+  }
+
+  // ── 账号级持久化快照（v2.2.11）：即使房间空了也保留，供新设备/久离线设备引导恢复 ──
+  //   协议（客户端 → 服务端，均不转发给对端）：
+  //     {__zr:'snap-w', seq, ts, total, size}  开写清单（total=分块数，size=密文总长）
+  //     {__zr:'snap-c', seq, i, b64}           第 i 块（密文分片，服务端不解析）
+  //     {__zr:'snap-end', seq}                 提交：完成标记 + 按时间保留最近 SNAP_KEEP 份
+  //     {__zr:'snap-list-req'}                 → 回 {__zr:'snap-list', list:[{seq,ts,total,size}]}
+  //     {__zr:'snap-get', seq}                 → 逐块回 {__zr:'snap-c', seq, i, b64} + {__zr:'snap-done', seq}
+  //   存储键：snapm:<seq>=清单{ts,total,size,done}；snapp:<seq>:<i>=分块。保留最近 SNAP_KEEP 份。
+  //   隐私不变：分块是客户端加密后的密文，服务端只见不透明字节。
+  static get SNAP_KEEP() { return 5; }
+  async _control(ws, j) {
+    const c = j.__zr;
+    try {
+      if (c === 'snap-w') {
+        await this.ctx.storage.put('snapm:' + j.seq, JSON.stringify({ ts: j.ts | 0, total: j.total | 0, size: j.size | 0, done: 0 }));
+        return;
+      }
+      if (c === 'snap-c') {
+        await this.ctx.storage.put('snapp:' + j.seq + ':' + (j.i | 0), String(j.b64 || ''));
+        return;
+      }
+      if (c === 'snap-end') {
+        const key = 'snapm:' + j.seq;
+        let m = null;
+        try { m = JSON.parse(await this.ctx.storage.get(key) || 'null'); } catch (_) {}
+        if (!m) return;
+        m.done = 1;
+        await this.ctx.storage.put(key, JSON.stringify(m));
+        await this._pruneSnaps();
+        return;
+      }
+      if (c === 'snap-list-req') {
+        const list = await this._listSnaps();
+        try { ws.send(JSON.stringify({ __zr: 'snap-list', list })); } catch (_) {}
+        return;
+      }
+      if (c === 'snap-get') {
+        const seq = String(j.seq || '');
+        let m = null;
+        try { m = JSON.parse(await this.ctx.storage.get('snapm:' + seq) || 'null'); } catch (_) {}
+        if (!m || !m.done) { try { ws.send(JSON.stringify({ __zr: 'snap-err', seq: seq, msg: 'not found' })); } catch (_) {} return; }
+        for (let i = 0; i < (m.total | 0); i++) {
+          const b64 = await this.ctx.storage.get('snapp:' + seq + ':' + i);
+          try { ws.send(JSON.stringify({ __zr: 'snap-c', seq: seq, i: i, b64: b64 || '' })); } catch (_) { return; }
+        }
+        try { ws.send(JSON.stringify({ __zr: 'snap-done', seq: seq, ts: m.ts, size: m.size })); } catch (_) {}
+        return;
+      }
+      if (c === 'snap-del') {
+        await this._delSnap(String(j.seq || ''));
+        return;
+      }
+    } catch (e) {
+      try { ws.send(JSON.stringify({ __zr: 'snap-err', msg: String(e && e.message || e).slice(0, 120) })); } catch (_) {}
+    }
+  }
+  async _listSnaps() {
+    const out = [];
+    const entries = await this.ctx.storage.list({ prefix: 'snapm:' });
+    for (const [k, v] of entries) {
+      try { const m = JSON.parse(v); out.push({ seq: k.slice(6), ts: m.ts || 0, total: m.total | 0, size: m.size | 0, done: m.done | 0 }); } catch (_) {}
+    }
+    out.sort((a, b) => b.ts - a.ts);
+    return out;
+  }
+  async _delSnap(seq) {
+    let m = null;
+    try { m = JSON.parse(await this.ctx.storage.get('snapm:' + seq) || 'null'); } catch (_) {}
+    const total = m ? (m.total | 0) : 16;
+    const ops = [];
+    ops.push(this.ctx.storage.delete('snapm:' + seq));
+    for (let i = 0; i < total; i++) ops.push(this.ctx.storage.delete('snapp:' + seq + ':' + i));
+    try { await Promise.all(ops); } catch (_) {}
+  }
+  async _pruneSnaps() {
+    const list = (await this._listSnaps()).filter(s => s.done);
+    // 未完成的半截快照（超过 1 小时）→ 清理；完成的按时间保留最近 SNAP_KEEP 份
+    const now = Date.now();
+    for (const s of (await this._listSnaps())) {
+      if (!s.done && now - s.ts > 3600_000) await this._delSnap(s.seq);
+    }
+    for (let i = Room.SNAP_KEEP; i < list.length; i++) await this._delSnap(list[i].seq);
   }
 
   async webSocketClose(ws) {

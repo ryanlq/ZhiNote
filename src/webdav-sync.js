@@ -173,6 +173,11 @@
 
   // ─── HTTP 封装 ───────────────────────────────────────────────────────────────
   function _fetchWithTimeout(url, options = {}) {
+    // 实时云模式：WebDAV 网络操作一律空转（数据走中继直推 + 快照，不经网盘）。
+    // 返回 204 让调用方走「空/无变化」分支，不报错、不重试。
+    if (_config && _config.transport === 'relay') {
+      return Promise.resolve(new Response(null, { status: 204 }));
+    }
     // Dropbox 传输模式：同步内核照旧发 WebDAV 请求，由 dropbox-transport 翻译成 Dropbox API。
     if (_config && _config.transport === 'dropbox' && window.dropboxTransport) {
       return window.dropboxTransport.webdavBridge(url, options);
@@ -1999,6 +2004,17 @@
   // ─── 配置加载 ────────────────────────────────────────────────────────────────
   async function loadConfig() {
     if (!window.storage) return false;
+    // 实时云模式（v2.2.11）：不配网盘，仅用中继直连 + 快照持久化。给 rtRoomId/加解密一个最小配置：
+    //   账号 = relay://|别名，口令照旧。所有 WebDAV 网络操作在此模式下是无害空转（_fetchWithTimeout 拦截）。
+    if ((window.storage.getSetting('syncMethod') || 'none') === 'relay') {
+      _config = {
+        url: 'relay://local/', user: String(window.storage.getSetting('relay_alias') || 'cloud'),
+        provider: 'relay', transport: 'relay', encryptNotes: true, proxy: '',
+      };
+      _ensureClientId();
+      _invalidateSyncBaseCache();
+      return true;
+    }
     // Dropbox 后端：复用整套同步内核，仅传输层不同（虚拟 base 由 dropbox-transport 拦截翻译）
     if ((window.storage.getSetting('syncMethod') || 'none') === 'dropbox') {
       _config = {
