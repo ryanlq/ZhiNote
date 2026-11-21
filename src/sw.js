@@ -37,6 +37,8 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return; // 跨域不拦截
+  // OAuth 回调页绝不拦截：授权码在查询串里，若被缓存优先/首页回退顶掉，Dropbox 授权必坏（真实事故）
+  if (url.pathname === '/dropbox-oauth' || url.pathname === '/dropbox-oauth.html') return;
   // 升级告知：每次要最新，不走 SW 缓存
   if (url.pathname.endsWith('/whats-new.json')) {
     e.respondWith(fetch(req, { cache: 'no-store' }));

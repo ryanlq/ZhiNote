@@ -8,9 +8,9 @@
  * - 跨域请求（CDN 依赖 / WebDAV / 代理）：完全不拦截，交给浏览器自身的 HTTP 缓存与网络。
  *   网盘数据绝不能被 SW 缓存，否则会读到陈旧的同步状态。
  *
- * v2.2.9 由发布脚本替换为版本号；版本变化 → 缓存名变化 → 旧缓存在 activate 时清除。
+ * v2.2.10 由发布脚本替换为版本号；版本变化 → 缓存名变化 → 旧缓存在 activate 时清除。
  */
-const VERSION = 'v2.2.9';
+const VERSION = 'v2.2.10';
 const CACHE = 'zhinote-' + VERSION;
 
 self.addEventListener('install', (e) => {
@@ -37,6 +37,8 @@ self.addEventListener('fetch', (e) => {
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return; // 跨域不拦截
+  // OAuth 回调页绝不拦截：授权码在查询串里，若被缓存优先/首页回退顶掉，Dropbox 授权必坏（真实事故）
+  if (url.pathname === '/dropbox-oauth' || url.pathname === '/dropbox-oauth.html') return;
   // 升级告知：每次要最新，不走 SW 缓存
   if (url.pathname.endsWith('/whats-new.json')) {
     e.respondWith(fetch(req, { cache: 'no-store' }));
